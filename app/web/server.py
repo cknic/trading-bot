@@ -18,15 +18,12 @@ TRADES_CSV = os.environ.get("TRADES_CSV", os.path.join(DATA_DIR, "trades.csv"))
 PNL_JSON = os.environ.get("PNL_JSON", os.path.join(DATA_DIR, "pnl.json"))
 EVENTS_JSONL = os.environ.get("EVENTS_JSONL", os.path.join(DATA_DIR, "events.jsonl"))
 STATE_JSON = os.environ.get("STATE_JSON", os.path.join(DATA_DIR, "state.json"))
+BOT_STATUS_JSON = os.environ.get("BOT_STATUS_JSON", os.path.join(DATA_DIR, "bot_status.json"))
 
 RUN_DIR = os.environ.get("RUN_DIR", "/run/trading")
 PAUSE_FILE = os.environ.get("PAUSE_FILE", os.path.join(RUN_DIR, "PAUSE"))
 KILL_FILE = os.environ.get("KILL_FILE", os.path.join(RUN_DIR, "KILL_SWITCH"))
 MANUAL_ORDER_PATH = os.environ.get("MANUAL_ORDER_PATH", os.path.join(RUN_DIR, "MANUAL_ORDER.json"))
-
-# Live latch (matches bot defaults)
-LIVE_LATCH_FILE = os.environ.get("LIVE_LATCH_FILE", os.path.join(RUN_DIR, "LIVE_LATCH"))
-REQUIRE_LIVE_LATCH = os.environ.get("REQUIRE_LIVE_LATCH", "1").strip().lower() not in ("0", "false", "")
 
 CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
 CONFIG_KRAKEN = os.path.join(CONFIG_DIR, "kraken.yaml")
@@ -35,9 +32,7 @@ CONFIG_AI = os.path.join(CONFIG_DIR, "ai.yaml")
 
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
-BOT_STATUS_JSON = os.environ.get("BOT_STATUS_PATH", os.path.join(DATA_DIR, "bot_status.json"))
-
-app = FastAPI(title="Trading Bot API", version="0.10")
+app = FastAPI(title="Trading Bot API", version="1.0")
 
 origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 app.add_middleware(
@@ -97,8 +92,11 @@ def _auth_ok(authorization: Optional[str]) -> bool:
 def _read_json(path: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not os.path.exists(path):
         return default or {}
-    with open(path, "r") as f:
-        return json.load(f)
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return default or {}
 
 
 def _read_text(path: str, max_bytes: int = 200_000) -> str:
@@ -173,27 +171,55 @@ def _load_yaml(path: str) -> Dict[str, Any]:
     txt = _read_text(path)
     if not txt.strip():
         return {}
-    return yaml.safe_load(txt) or {}
+    try:
+        return yaml.safe_load(txt) or {}
+    except Exception:
+        return {}
 
 
-def _trading_mode() -> str:
-    kcfg = _load_yaml(CONFIG_KRAKEN)
-    return ((kcfg.get("trading", {}) or {}).get("mode", "") or "").strip().lower()
+# -----------------------------
+# Bot status (IMPORTANT FIX)
+# -----------------------------
+def _read_bot_status() -> Dict[str, Any]:
+    """
+    Reads bot_status.json written by the bot (your schema):
+      mode_config, live_allowed, latch_required, latch_present, latch_file, killed, etc.
 
+    Normalizes into fields used by /health + UI:
+      mode_requested, mode_effective, allow_live, require_live_latch, live_latch_present, live_latch_file, blocked_reasons
+    """
+    bs = _read_json(BOT_STATUS_JSON, default={})
+    if not isinstance(bs, dict) or not bs:
+        return {}
 
-def _latch_present() -> bool:
-    return os.path.exists(LIVE_LATCH_FILE)
+    mode_cfg = (bs.get("mode_config") or "").strip().lower() or "unknown"
+    live_allowed = bs.get("live_allowed")
+    latch_required = bs.get("latch_required")
+    latch_present = bs.get("latch_present")
+    latch_file = bs.get("latch_file")
+    killed = bool(bs.get("killed", False))
 
+    mode_effective = mode_cfg
+    blocked: List[str] = []
 
-def _live_allowed() -> bool:
-    # mirror the bot’s allow_live behavior at a high level
-    if _trading_mode() != "live":
-        return False
-    if os.path.exists(KILL_FILE):
-        return False
-    if REQUIRE_LIVE_LATCH and (not _latch_present()):
-        return False
-    return True
+    if mode_cfg == "live":
+        if live_allowed is False:
+            mode_effective = "dry_run"
+            if killed:
+                blocked.append("KILL_SWITCH present")
+            if latch_required and (not latch_present):
+                blocked.append("LIVE_LATCH missing")
+
+    return {
+        "ts": bs.get("ts"),
+        "mode_requested": mode_cfg,
+        "mode_effective": mode_effective,
+        "allow_live": live_allowed,
+        "require_live_latch": latch_required,
+        "live_latch_present": latch_present,
+        "live_latch_file": latch_file,
+        "blocked_reasons": blocked,
+    }
 
 
 # -----------------------------
@@ -202,10 +228,7 @@ def _live_allowed() -> bool:
 @app.get("/health")
 def health(authorization: Optional[str] = Header(default=None)):
     pnl = _read_json(PNL_JSON)
-    mode = _trading_mode()
-    latch_present = _latch_present()
-    live_allowed = _live_allowed()
-
+    bs = _read_bot_status()
     return {
         "ok": True,
         "uptime_s": int(time.time()) - START_TS,
@@ -215,11 +238,16 @@ def health(authorization: Optional[str] = Header(default=None)):
         "portfolio": (pnl.get("portfolio") or {}),
         "auth_ok": _auth_ok(authorization),
         "auth_required": bool(ADMIN_TOKEN),
-        # new:
-        "trading_mode": mode,
-        "live_latch_required": bool(REQUIRE_LIVE_LATCH),
-        "live_latch_present": bool(latch_present),
-        "live_allowed": bool(live_allowed),
+
+        # bot live/latch status (normalized)
+        "bot_status_ts": bs.get("ts"),
+        "mode_requested": bs.get("mode_requested"),
+        "mode_effective": bs.get("mode_effective"),
+        "allow_live": bs.get("allow_live"),
+        "require_live_latch": bs.get("require_live_latch"),
+        "live_latch_present": bs.get("live_latch_present"),
+        "live_latch_file": bs.get("live_latch_file"),
+        "blocked_reasons": bs.get("blocked_reasons") or [],
     }
 
 
@@ -243,9 +271,9 @@ def events(limit: int = 200):
 @app.get("/equity")
 def equity(limit: int = 200, authorization: Optional[str] = Header(default=None)):
     """
-    Returns realized equity curve points as: [[ts, realized_pnl], ...]
+    Returns realized equity curve points as:
+      {"ok": true, "count": N, "items": [[ts, realized_pnl], ...]}
     Prefer pnl.json['equity_curve_realized'] if present.
-    Fallback: derive points from trades.csv if it contains realized_pnl_usd (optional).
     """
     _require_auth(authorization)
 
@@ -261,18 +289,6 @@ def equity(limit: int = 200, authorization: Optional[str] = Header(default=None)
                 out.append((ts, val))
             except Exception:
                 continue
-
-    if not out and os.path.exists(TRADES_CSV):
-        try:
-            with open(TRADES_CSV, "r", newline="") as f:
-                r = csv.DictReader(f)
-                for row in r:
-                    if "realized_pnl_usd" in row and row.get("realized_pnl_usd") not in (None, ""):
-                        ts = int(float(row.get("ts") or "0"))
-                        val = float(row.get("realized_pnl_usd") or 0.0)
-                        out.append((ts, val))
-        except Exception:
-            pass
 
     out = sorted(out, key=lambda x: x[0])
     limit = max(1, min(int(limit), 5000))
@@ -324,11 +340,6 @@ def config_summary():
         "fail_closed": bool(r_saf.get("fail_closed", True)),
         "ai_provider": provider,
         "ai_model": model,
-        # new:
-        "live_latch_required": bool(REQUIRE_LIVE_LATCH),
-        "live_latch_present": bool(_latch_present()),
-        "live_allowed": bool(_live_allowed()),
-        "live_latch_file": LIVE_LATCH_FILE,
     }
 
 
@@ -443,40 +454,14 @@ def _compute_order_preview(pair: str, side: str, notional_usd: float) -> Dict[st
 def preview_order(body: PreviewBody):
     return _compute_order_preview(body.pair, body.side, body.notional_usd)
 
-@app.get("/health")
-def health(authorization: Optional[str] = Header(default=None)):
-    pnl = _read_json(PNL_JSON)
-    bot = _read_json(BOT_STATUS_JSON, default={})
-
-    return {
-        "ok": True,
-        "uptime_s": int(time.time()) - START_TS,
-        "paused": os.path.exists(PAUSE_FILE),
-        "kill_switch": os.path.exists(KILL_FILE),
-        "pnl_ts": pnl.get("ts"),
-        "portfolio": (pnl.get("portfolio") or {}),
-        "auth_ok": _auth_ok(authorization),
-        "auth_required": bool(ADMIN_TOKEN),
-
-        # bot-reported truth (preferred)
-        "bot": bot,
-    }
-
 
 @app.post("/manual/execute")
 def manual_execute(body: ManualExecuteBody, authorization: Optional[str] = Header(default=None)):
     """
     Queues a one-shot request file for the bot to consume.
-
-    Safety: still requires trading.mode == dry_run.
-    (We can later allow live manual behind latch + extra confirmations + limits.)
+    We keep it gated in the bot (and/or by latch) for safety.
     """
     _require_auth(authorization)
-
-    kcfg = _load_yaml(CONFIG_KRAKEN)
-    mode = ((kcfg.get("trading", {}) or {}).get("mode", "") or "").strip().lower()
-    if mode != "dry_run":
-        raise HTTPException(status_code=400, detail="Refusing manual execute: trading.mode is not dry_run")
 
     out = _compute_order_preview(body.pair, body.side, body.notional_usd)
 
@@ -530,7 +515,7 @@ _UI_HTML = r"""<!doctype html>
     button.primary { border-color:#111; }
     button:disabled { opacity:0.5; cursor:not-allowed; }
     input, select { padding:8px; border-radius:8px; border:1px solid #ccc; }
-    input { width: 360px; }
+    input { width: 520px; max-width: 100%; }
     .muted { color:#666; font-size: 12px; }
     .ok { color: #0a7; font-weight: 600; }
     .bad { color: #c22; font-weight: 600; }
@@ -539,7 +524,7 @@ _UI_HTML = r"""<!doctype html>
     th, td { border-bottom: 1px solid #eee; padding: 6px 8px; font-size: 12px; text-align:left; }
     th { background:#fafafa; position: sticky; top: 0; }
     .scroll { max-height: 260px; overflow:auto; border:1px solid #eee; border-radius:8px; }
-    .kv { display:grid; grid-template-columns: 160px 1fr; gap:6px 10px; font-size:13px; }
+    .kv { display:grid; grid-template-columns: 180px 1fr; gap:6px 10px; font-size:13px; }
     .k { color:#444; }
     .v { font-weight:600; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
@@ -552,7 +537,7 @@ _UI_HTML = r"""<!doctype html>
 
   <div class="card">
     <h2>Admin Token</h2>
-    <div class="row">
+    <div class="row" style="align-items:center;">
       <input id="token" type="password" placeholder="Paste ADMIN_TOKEN once (stored in localStorage)" />
       <button class="primary" onclick="saveToken()">Save</button>
       <button onclick="clearToken()">Clear</button>
@@ -563,7 +548,7 @@ _UI_HTML = r"""<!doctype html>
   </div>
 
   <div class="row">
-    <div class="card" style="min-width:420px;">
+    <div class="card" style="min-width:520px;">
       <h2>Health</h2>
       <div id="healthBadges" class="row"></div>
       <div class="kv" style="margin-top:10px;">
@@ -571,6 +556,11 @@ _UI_HTML = r"""<!doctype html>
         <div class="k">paused</div><div class="v" id="hPaused">—</div>
         <div class="k">kill switch</div><div class="v" id="hKill">—</div>
         <div class="k">pnl_ts</div><div class="v mono" id="hPnlTs">—</div>
+        <div class="k">mode (requested)</div><div class="v" id="hModeReq">—</div>
+        <div class="k">mode (effective)</div><div class="v" id="hModeEff">—</div>
+        <div class="k">allow_live</div><div class="v" id="hAllowLive">—</div>
+        <div class="k">live latch</div><div class="v mono" id="hLatch">—</div>
+        <div class="k">blocked reasons</div><div class="v mono" id="hBlocked">—</div>
       </div>
       <div class="row" style="margin-top:12px;">
         <button id="btnPause" onclick="pause()">Pause</button>
@@ -598,7 +588,7 @@ _UI_HTML = r"""<!doctype html>
     </div>
 
     <div class="card" style="min-width:520px;">
-      <h2>Manual Execute (dry-run only)</h2>
+      <h2>Manual Execute</h2>
       <div class="row">
         <select id="mxPair"></select>
         <select id="mxSide">
@@ -608,7 +598,7 @@ _UI_HTML = r"""<!doctype html>
         <input id="mxNotional" value="20" style="width:120px;" />
         <button class="primary" onclick="manualExecute()">Execute</button>
       </div>
-      <div class="muted" style="margin-top:6px;">Queues a one-shot request for the bot. Refuses unless <code>trading.mode</code> is <code>dry_run</code>.</div>
+      <div class="muted" style="margin-top:6px;">Queues a one-shot request for the bot to consume.</div>
       <div class="scroll" style="max-height:220px;"><table id="mxTbl"></table></div>
     </div>
 
@@ -680,29 +670,26 @@ function setAuthUI(authRequired, authOk) {
   const enableControls = (!authRequired) || authOk;
   ["btnPause","btnResume","btnKill","btnUnkill"].forEach(id => document.getElementById(id).disabled = !enableControls);
 }
+
 function renderBadges(h) {
   const el = document.getElementById("healthBadges");
   const ok = (h.ok && !h.kill_switch);
-
-  const mode = (h.trading_mode || "unknown").toLowerCase();
-  const modeClass = (mode === "live") ? "bad" : "ok";
-
-  const latchReq = !!h.live_latch_required;
-  const latchPresent = !!h.live_latch_present;
-  const liveAllowed = !!h.live_allowed;
-
-  const latchClass = (!latchReq) ? "ok" : (latchPresent ? "ok" : "bad");
-  const allowClass = liveAllowed ? "ok" : "bad";
+  const latchTxt = h.require_live_latch ? (h.live_latch_present ? "latch=present" : "latch=missing") : "latch=not-required";
+  const latchCls = h.require_live_latch ? (h.live_latch_present ? "ok" : "bad") : "ok";
+  const allowTxt = (h.allow_live === true) ? "allow_live=true" : "allow_live=false";
+  const allowCls = (h.allow_live === true) ? "ok" : "bad";
+  const modeReq = h.mode_requested || "unknown";
 
   el.innerHTML = `
     <span class="pill ${ok ? "ok":"bad"}">${ok ? "OK":"NOT OK"}</span>
     <span class="pill ${h.paused ? "bad":"ok"}">paused=${h.paused}</span>
     <span class="pill ${h.kill_switch ? "bad":"ok"}">kill=${h.kill_switch}</span>
-    <span class="pill ${modeClass}">mode=${mode}</span>
-    <span class="pill ${latchClass}">latch=${latchReq ? (latchPresent ? "present" : "missing") : "not required"}</span>
-    <span class="pill ${allowClass}">live_allowed=${liveAllowed}</span>
+    <span class="pill ${(modeReq==="live") ? "bad" : "ok"}">mode=${modeReq}</span>
+    <span class="pill ${allowCls}">${allowTxt}</span>
+    <span class="pill ${latchCls}">${latchTxt}</span>
   `;
 }
+
 function renderTrades(items) {
   const tbl = document.getElementById("tradesTbl");
   const head = `<tr><th>time (ET)</th><th>pair</th><th>side</th><th>price</th><th>notional</th><th>mode</th></tr>`;
@@ -718,6 +705,7 @@ function renderTrades(items) {
   )).join("");
   tbl.innerHTML = head + rows;
 }
+
 function renderEvents(items) {
   const tbl = document.getElementById("eventsTbl");
   const head = `<tr><th>time (ET)</th><th>event</th><th>pair</th><th>action</th><th>reason</th></tr>`;
@@ -732,6 +720,7 @@ function renderEvents(items) {
   )).join("");
   tbl.innerHTML = head + rows;
 }
+
 function renderEqTable(curve) {
   const tbl = document.getElementById("eqTbl");
   const head = `<tr><th>time (ET)</th><th>realized_pnl</th></tr>`;
@@ -740,6 +729,7 @@ function renderEqTable(curve) {
   )).join("");
   tbl.innerHTML = head + rows;
 }
+
 function drawEquity(curve) {
   const c = document.getElementById("eqCanvas");
   const ctx = c.getContext("2d");
@@ -778,6 +768,7 @@ function drawEquity(curve) {
   ctx.font = "12px ui-monospace, Menlo, monospace";
   ctx.fillText(`last: ${money(last)}`, pad, pad);
 }
+
 function renderPreview(out, tableId) {
   const tbl = document.getElementById(tableId);
   const rows = [
@@ -802,11 +793,21 @@ async function refresh() {
   const h = await api("/health", {method:"GET", headers:{}});
   setAuthUI(h.auth_required, h.auth_ok);
   renderBadges(h);
+
   document.getElementById("hUptime").textContent = `${h.uptime_s}s`;
   document.getElementById("hPaused").textContent = String(h.paused);
   document.getElementById("hKill").textContent = String(h.kill_switch);
   document.getElementById("hPnlTs").textContent = fmtTs(h.pnl_ts || 0);
-  document.getElementById("healthRawMini").textContent = `ok=${h.ok} paused=${h.paused} kill=${h.kill_switch} mode=${h.trading_mode} live_allowed=${h.live_allowed}`;
+
+  document.getElementById("hModeReq").textContent = String(h.mode_requested || "unknown");
+  document.getElementById("hModeEff").textContent = String(h.mode_effective || "unknown");
+  document.getElementById("hAllowLive").textContent = String(h.allow_live);
+  const latchLine = `required=${!!h.require_live_latch} present=${!!h.live_latch_present} file=${h.live_latch_file||""}`;
+  document.getElementById("hLatch").textContent = latchLine;
+  document.getElementById("hBlocked").textContent = (h.blocked_reasons||[]).join("; ") || "";
+
+  document.getElementById("healthRawMini").textContent =
+    `ok=${h.ok} paused=${h.paused} kill=${h.kill_switch} mode=${h.mode_requested||"?"} allow_live=${h.allow_live}`;
 
   const p = await api("/pnl");
   const port = p.portfolio || {};
@@ -861,6 +862,7 @@ async function preview() {
     document.getElementById("pvTbl").innerHTML = `<tr><th>Error</th></tr><tr><td class="mono">${e.message}</td></tr>`;
   }
 }
+
 async function manualExecute() {
   const pair = document.getElementById("mxPair").value;
   const side = document.getElementById("mxSide").value;
