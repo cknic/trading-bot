@@ -1,0 +1,13 @@
+# Secrets
+*.env
+secrets.env
+/run/trading/*
+!/run/trading/.gitkeep
+
+# Runtime data
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
