@@ -1,0 +1,57 @@
+{
+  "ts": 1766772569,
+  "portfolio": {
+    "realized_pnl_usd": -0.50517,
+    "unrealized_pnl_usd": 0.0,
+    "net_pnl_usd": -0.50517,
+    "wins": 0,
+    "losses": 3,
+    "trades_closed": 3,
+    "win_rate": 0.0,
+    "max_drawdown_usd": 0.50517
+  },
+  "pairs": {
+    "XXBTZUSD": {
+      "realized_pnl_usd": -0.199993,
+      "unrealized_pnl_usd": 0.0,
+      "net_pnl_usd": -0.199993,
+      "wins": 0,
+      "losses": 2,
+      "trades_closed": 2,
+      "win_rate": 0.0,
+      "open_position": false,
+      "open_volume": 0.0,
+      "entry_price": 0.0,
+      "mark_price": 87179.9,
+      "last_event_ts": 1766760927
+    },
+    "XETHZUSD": {
+      "realized_pnl_usd": -0.305177,
+      "unrealized_pnl_usd": 0.0,
+      "net_pnl_usd": -0.305177,
+      "wins": 0,
+      "losses": 1,
+      "trades_closed": 1,
+      "win_rate": 0.0,
+      "open_position": false,
+      "open_volume": 0.0,
+      "entry_price": 0.0,
+      "mark_price": 2921.52,
+      "last_event_ts": 1766761243
+    }
+  },
+  "equity_curve_realized": [
+    [
+      1766760668,
+      -0.13917113000000197
+    ],
+    [
+      1766760927,
+      -0.19999325400000328
+    ],
+    [
+      1766761243,
+      -0.5051698516000038
+    ]
+  ]
+}

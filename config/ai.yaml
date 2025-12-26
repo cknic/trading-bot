@@ -1,0 +1,9 @@
+provider: openai   # openai | openrouter
+openai:
+  model: "gpt-5-mini"
+openrouter:
+  model: "openai/gpt-5.2-mini"
+risk_policy:
+  ai_can_disable_strategies: true
+  ai_can_reduce_size: true
+  ai_can_increase_size: false

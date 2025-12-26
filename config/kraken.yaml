@@ -1,0 +1,36 @@
+kraken:
+  base_url: "https://api.kraken.com"
+  pairs:
+    - "XBTUSD"
+    - "ETHUSD"
+
+trading:
+  mode: "live"          # dry_run | live
+  order_type: "limit"      # limit | market
+  quote_notional_usd: 20.0
+  poll_seconds: 60
+
+safety:
+  max_spread_pct: 0.30
+  max_slippage_pct: 0.50
+  limit_offset_pct: 0.02
+
+strategy:
+  timeframe_minutes: 15
+  sma_short: 10
+  sma_long: 30
+  min_candles: 60
+  simulate_fills_in_dry_run: true
+
+cooldown:
+  hours_after_trade: 4
+
+fill_sim:
+  mode: "probabilistic"     # cross_only | probabilistic
+  partial_fills: false      # keep false for now
+  random_seed: 42           # deterministic behavior
+
+pnl:
+  write_csv: true
+  csv_path: "/data/trades.csv"
+  summary_path: "/data/pnl.json"

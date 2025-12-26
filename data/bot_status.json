@@ -1,0 +1,27 @@
+{
+  "boot_ts": 1766779604,
+  "cooldowns": {
+    "XETHZUSD": {
+      "cooldown_until": 1766761243,
+      "remaining_s": 0
+    },
+    "XXBTZUSD": {
+      "cooldown_until": 1766789917,
+      "remaining_s": 9930
+    }
+  },
+  "killed": false,
+  "last_error": "",
+  "last_loop_ok": true,
+  "latch_file": "/run/trading/LIVE_LATCH",
+  "latch_present": false,
+  "latch_required": true,
+  "live_allowed": false,
+  "mode_config": "live",
+  "pairs": [
+    "XXBTZUSD",
+    "XETHZUSD"
+  ],
+  "paused": false,
+  "ts": 1766779987
+}

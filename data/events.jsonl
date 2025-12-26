@@ -1,0 +1,251 @@
+{"event":"bot_start","model":"gpt-5-mini","provider":"openai","ts":1766769026}
+{"event":"kraken_test_ok","ts":1766769028}
+{"event":"pairs_configured","pairs":["XXBTZUSD","XETHZUSD"],"ts":1766769028}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769028}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87000.51, l=88131.27)","ts":1766769029}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.35, l=2951.71)","ts":1766769029}
+{"event":"ai_ok","ts":1766769033}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769088}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86997.90, l=88130.40)","ts":1766769089}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.25, l=2951.68)","ts":1766769089}
+{"event":"ai_ok","ts":1766769092}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769148}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86999.49, l=88130.93)","ts":1766769149}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.25, l=2951.68)","ts":1766769149}
+{"event":"ai_ok","ts":1766769152}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769208}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87001.20, l=88131.50)","ts":1766769208}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.25, l=2951.68)","ts":1766769208}
+{"event":"ai_ok","ts":1766769210}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769268}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87004.54, l=88132.61)","ts":1766769268}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.46, l=2951.75)","ts":1766769269}
+{"event":"ai_ok","ts":1766769272}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769328}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86961.25, l=88072.09)","ts":1766769328}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.21, l=2949.84)","ts":1766769329}
+{"event":"ai_ok","ts":1766769331}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769389}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86962.09, l=88072.37)","ts":1766769389}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.40, l=2949.91)","ts":1766769390}
+{"event":"ai_ok","ts":1766769393}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769448}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86958.88, l=88071.30)","ts":1766769448}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.29, l=2949.87)","ts":1766769448}
+{"event":"ai_ok","ts":1766769450}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769509}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86958.51, l=88071.18)","ts":1766769509}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.30, l=2949.87)","ts":1766769509}
+{"event":"ai_ok","ts":1766769511}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769568}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86960.13, l=88071.72)","ts":1766769569}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.43, l=2949.92)","ts":1766769569}
+{"event":"ai_ok","ts":1766769571}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769628}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86960.16, l=88071.73)","ts":1766769629}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.36, l=2949.89)","ts":1766769629}
+{"event":"ai_ok","ts":1766769631}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769688}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86961.03, l=88072.02)","ts":1766769688}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.39, l=2949.90)","ts":1766769689}
+{"event":"ai_ok","ts":1766769692}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769749}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86955.77, l=88070.26)","ts":1766769749}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.27, l=2949.86)","ts":1766769749}
+{"event":"ai_ok","ts":1766769752}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769808}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86956.94, l=88070.65)","ts":1766769808}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.24, l=2949.85)","ts":1766769809}
+{"event":"ai_ok","ts":1766769811}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769868}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86962.62, l=88072.55)","ts":1766769869}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.42, l=2949.91)","ts":1766769869}
+{"event":"ai_ok","ts":1766769882}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769928}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86963.37, l=88072.80)","ts":1766769928}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.41, l=2949.91)","ts":1766769928}
+{"event":"ai_ok","ts":1766769931}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766769988}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86971.66, l=88075.56)","ts":1766769988}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2914.53, l=2949.95)","ts":1766769988}
+{"event":"ai_ok","ts":1766769991}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770048}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86983.14, l=88079.39)","ts":1766770048}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2915.83, l=2950.38)","ts":1766770049}
+{"event":"ai_ok","ts":1766770051}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770108}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86979.09, l=88078.04)","ts":1766770108}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2915.51, l=2950.27)","ts":1766770109}
+{"event":"ai_ok","ts":1766770111}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770169}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=86987.58, l=88080.87)","ts":1766770169}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2915.80, l=2950.37)","ts":1766770169}
+{"event":"ai_ok","ts":1766770172}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770228}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87045.27, l=88029.49)","ts":1766770228}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.47, l=2949.03)","ts":1766770228}
+{"event":"ai_ok","ts":1766770231}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770288}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87044.21, l=88029.14)","ts":1766770288}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.35, l=2948.99)","ts":1766770288}
+{"event":"ai_ok","ts":1766770290}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770349}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87043.86, l=88029.02)","ts":1766770349}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.21, l=2948.95)","ts":1766770350}
+{"event":"ai_ok","ts":1766770352}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770409}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87041.98, l=88028.39)","ts":1766770409}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.10, l=2948.91)","ts":1766770409}
+{"event":"ai_ok","ts":1766770411}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770469}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87043.23, l=88028.81)","ts":1766770469}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.03, l=2948.89)","ts":1766770469}
+{"event":"ai_ok","ts":1766770475}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770529}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87032.76, l=88025.32)","ts":1766770529}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.69, l=2948.77)","ts":1766770529}
+{"event":"ai_ok","ts":1766770531}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770590}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87034.49, l=88025.90)","ts":1766770590}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.69, l=2948.77)","ts":1766770590}
+{"event":"ai_ok","ts":1766770593}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770649}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87037.51, l=88026.90)","ts":1766770649}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.76, l=2948.80)","ts":1766770650}
+{"event":"ai_ok","ts":1766770652}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770709}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87035.67, l=88026.29)","ts":1766770709}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.63, l=2948.75)","ts":1766770709}
+{"event":"ai_ok","ts":1766770713}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770770}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87046.01, l=88029.74)","ts":1766770770}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.85, l=2948.82)","ts":1766770770}
+{"event":"ai_ok","ts":1766770772}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770829}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87039.55, l=88027.58)","ts":1766770829}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.73, l=2948.78)","ts":1766770829}
+{"event":"ai_ok","ts":1766770832}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770890}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87048.25, l=88030.48)","ts":1766770890}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.00, l=2948.87)","ts":1766770890}
+{"event":"ai_ok","ts":1766770892}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766770950}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87048.26, l=88030.49)","ts":1766770950}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.00, l=2948.87)","ts":1766770950}
+{"event":"ai_ok","ts":1766770953}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771009}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87051.80, l=88031.67)","ts":1766771009}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.00, l=2948.87)","ts":1766771010}
+{"event":"ai_ok","ts":1766771012}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771069}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87048.26, l=88030.49)","ts":1766771069}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.80, l=2948.81)","ts":1766771069}
+{"event":"ai_ok","ts":1766771072}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771129}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87084.70, l=87981.20)","ts":1766771129}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.41, l=2947.17)","ts":1766771130}
+{"event":"ai_ok","ts":1766771134}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771189}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87088.08, l=87982.33)","ts":1766771189}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.49, l=2947.20)","ts":1766771190}
+{"event":"ai_ok","ts":1766771192}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771249}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87090.29, l=87983.07)","ts":1766771249}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.50, l=2947.20)","ts":1766771250}
+{"event":"ai_ok","ts":1766771253}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771309}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87088.46, l=87982.46)","ts":1766771310}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.57, l=2947.22)","ts":1766771310}
+{"event":"ai_ok","ts":1766771313}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771369}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87088.47, l=87982.46)","ts":1766771369}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.43, l=2947.18)","ts":1766771370}
+{"event":"ai_ok","ts":1766771372}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771429}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87091.07, l=87983.33)","ts":1766771429}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.52, l=2947.21)","ts":1766771430}
+{"event":"ai_ok","ts":1766771433}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771490}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87082.17, l=87980.36)","ts":1766771490}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.10, l=2947.07)","ts":1766771490}
+{"event":"ai_ok","ts":1766771491}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771549}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87078.66, l=87979.19)","ts":1766771549}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.83, l=2946.98)","ts":1766771550}
+{"event":"ai_ok","ts":1766771552}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771609}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87077.22, l=87978.71)","ts":1766771609}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.86, l=2946.99)","ts":1766771610}
+{"event":"ai_ok","ts":1766771612}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771669}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87078.25, l=87979.05)","ts":1766771669}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.81, l=2946.97)","ts":1766771669}
+{"event":"ai_ok","ts":1766771671}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771729}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87082.51, l=87980.47)","ts":1766771729}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.93, l=2947.01)","ts":1766771730}
+{"event":"ai_ok","ts":1766771732}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771789}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87083.62, l=87980.84)","ts":1766771789}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2917.87, l=2946.99)","ts":1766771790}
+{"event":"ai_ok","ts":1766771792}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771849}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87081.53, l=87980.15)","ts":1766771850}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.00, l=2947.03)","ts":1766771850}
+{"event":"ai_ok","ts":1766771852}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771909}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87081.72, l=87980.21)","ts":1766771910}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.01, l=2947.04)","ts":1766771910}
+{"event":"ai_ok","ts":1766771912}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766771969}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87078.97, l=87979.29)","ts":1766771969}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.00, l=2947.03)","ts":1766771969}
+{"event":"ai_ok","ts":1766771971}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772030}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87113.26, l=87931.29)","ts":1766772030}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.75, l=2945.43)","ts":1766772030}
+{"event":"ai_ok","ts":1766772032}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772089}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87114.01, l=87931.54)","ts":1766772089}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.92, l=2945.48)","ts":1766772090}
+{"event":"ai_ok","ts":1766772092}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772149}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87111.15, l=87930.59)","ts":1766772149}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.91, l=2945.48)","ts":1766772149}
+{"event":"ai_ok","ts":1766772151}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772210}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87108.88, l=87929.83)","ts":1766772210}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.81, l=2945.45)","ts":1766772210}
+{"event":"ai_ok","ts":1766772211}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772270}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87106.95, l=87929.19)","ts":1766772270}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.95, l=2945.49)","ts":1766772270}
+{"event":"ai_ok","ts":1766772272}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772329}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87112.13, l=87930.92)","ts":1766772329}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2919.01, l=2945.51)","ts":1766772330}
+{"event":"ai_ok","ts":1766772331}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772389}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87108.87, l=87929.83)","ts":1766772390}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.94, l=2945.49)","ts":1766772390}
+{"event":"ai_ok","ts":1766772392}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772449}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87104.87, l=87928.50)","ts":1766772449}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2918.95, l=2945.49)","ts":1766772450}
+{"event":"ai_ok","ts":1766772452}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772509}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87105.86, l=87928.83)","ts":1766772509}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2919.00, l=2945.51)","ts":1766772509}
+{"event":"ai_ok","ts":1766772511}
+{"event":"pnl_updated","max_drawdown_usd":0.50517,"realized_pnl_usd":-0.50517,"ts":1766772569}
+{"event":"hold","pair":"XXBTZUSD","reason":"no cross condition (s=87106.00, l=87928.87)","ts":1766772570}
+{"event":"hold","pair":"XETHZUSD","reason":"no cross condition (s=2919.01, l=2945.51)","ts":1766772570}
+{"event":"ai_ok","ts":1766772572}
+{"ts": 1766773271, "event": "manual_order_queued", "pair": "XXBTZUSD", "side": "buy", "notional_usd": 20.0, "id": "manual_1766773271"}
+{"ts": 1766773582, "event": "manual_order_queued", "pair": "XXBTZUSD", "side": "buy", "notional_usd": 20.0, "id": "manual_1766773582"}
+{"ts": 1766775334, "event": "manual_order_queued", "pair": "XXBTZUSD", "side": "buy", "notional_usd": 20.0, "id": "manual_1766775334"}
+{"event":"manual_order_processing","id":"manual_1766775334","notional_usd":20.0,"pair":"XXBTZUSD","side":"buy","ts":1766775389}
+{"effective_notional_usd":20.0,"event":"manual_order_executed","id":"manual_1766775334","mode":"dry_run","ordertype":"limit","pair":"XXBTZUSD","price":"87242.84508","reason":"dry-run","requested_notional_usd":20.0,"side":"buy","slippage_pct":5.732278516321054e-05,"spread_pct":0.0001146455703431042,"ts":1766775390,"volume":"0.00022929"}
+{"ts": 1766775494, "event": "manual_order_queued", "pair": "XXBTZUSD", "side": "buy", "notional_usd": 20.0, "id": "manual_1766775494"}
+{"event":"manual_order_processing","id":"manual_1766775494","notional_usd":20.0,"pair":"XXBTZUSD","side":"buy","ts":1766775517}
+{"effective_notional_usd":20.0,"event":"manual_order_executed","id":"manual_1766775494","mode":"dry_run","ordertype":"limit","pair":"XXBTZUSD","price":"87197.63604","reason":"dry-run","requested_notional_usd":20.0,"side":"buy","slippage_pct":5.735250513208613e-05,"spread_pct":0.00011470501024748048,"ts":1766775517,"volume":"0.00022941"}

@@ -1,0 +1,31 @@
+safety:
+  fail_closed: true
+
+# Existing structure kept (plus USD breakers added)
+account:
+  # Existing (not used by circuit breaker yet, kept for future)
+  max_drawdown_pct: 10.0
+  max_daily_loss_pct: 3.0
+
+  # NEW (used now): circuit breakers based on pnl.json values (USD)
+  max_drawdown_usd: 10.0
+  max_daily_loss_usd: 5.0
+
+trade:
+  max_open_positions: 8
+  max_notional_usd_per_trade: 20.0
+
+  # Existing global cap
+  max_trades_per_day: 3
+
+  # NEW per-pair cap
+  max_trades_per_day_per_pair: 3
+
+leverage_caps:
+  stocks: 1.25
+  crypto: 1.50
+
+# NEW: file-based controls (maps perfectly to your future UI buttons)
+controls:
+  pause_file: "/run/trading/PAUSE"
+  kill_switch_file: "/run/trading/KILL_SWITCH"

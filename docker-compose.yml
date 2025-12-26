@@ -1,0 +1,47 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    image: trading-bot-bot
+    restart: unless-stopped
+    env_file:
+      - /run/trading/secrets.env
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - RUN_DIR=/run/trading
+      - LIVE_LATCH_FILE=/run/trading/LIVE_LATCH
+      - REQUIRE_LIVE_LATCH=1
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - trading-run:/run/trading
+    command: ["python", "-u", "/app/app/main.py"]
+
+  api:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    image: trading-bot-api
+    restart: unless-stopped
+    env_file:
+      - /run/trading/secrets.env
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - DATA_DIR=/data
+      - RUN_DIR=/run/trading
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - LIVE_LATCH_FILE=/run/trading/LIVE_LATCH
+      - REQUIRE_LIVE_LATCH=1
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - trading-run:/run/trading
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: ["uvicorn", "app.web.server:app", "--host", "0.0.0.0", "--port", "8080"]
+
+volumes:
+  trading-run:
