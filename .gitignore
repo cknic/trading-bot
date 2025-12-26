@@ -1,4 +1,25 @@
-# Secrets
+# Secrets (never commit)
+*.env
+secrets.env
+/run/trading/*
+/run/*
+/**/secrets.env
+
+# Runtime / telemetry
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code / OS cruft
+.vscode/
+.DS_Store
+
+# Microsoft / device caches (accidental)
+None/
+.cache/# Secrets
 *.env
 secrets.env
 /run/trading/*

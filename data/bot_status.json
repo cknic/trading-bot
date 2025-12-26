@@ -7,7 +7,7 @@
     },
     "XXBTZUSD": {
       "cooldown_until": 1766789917,
-      "remaining_s": 9930
+      "remaining_s": 9494
     }
   },
   "killed": false,
@@ -23,5 +23,5 @@
     "XETHZUSD"
   ],
   "paused": false,
-  "ts": 1766779987
+  "ts": 1766780423
 }
