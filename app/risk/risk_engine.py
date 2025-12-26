@@ -47,6 +47,9 @@ class RiskEngine:
             trade.get("max_trades_per_day_per_pair", self.max_trades_per_day)
         )
 
+        # Choice C behavior: by default, DO NOT count/enforce trades/day in dry-run
+        self.count_trades_in_dry_run = bool(trade.get("count_trades_in_dry_run", False))
+
         # Circuit breakers (USD-based today, sourced from pnl.json)
         account = cfg.get("account", {})
         self.max_daily_loss_usd = float(account.get("max_daily_loss_usd", 0.0))
@@ -86,6 +89,14 @@ class RiskEngine:
             self.trades_today = 0
             self.trades_today_by_pair = {}
 
+    def _is_live_mode(self, mode: str) -> bool:
+        return (mode or "").strip().lower() == "live"
+
+    def _count_trades_for_mode(self, mode: str) -> bool:
+        # Enforce/count trades/day in live always.
+        # In dry_run, only if explicitly enabled.
+        return self._is_live_mode(mode) or self.count_trades_in_dry_run
+
     # -----------------
     # Control state
     # -----------------
@@ -123,7 +134,7 @@ class RiskEngine:
         self.portfolio_realized = float(realized_pnl_usd)
         self.portfolio_max_dd = float(max_drawdown_usd)
 
-        # USD-based breakers (existing behavior)
+        # USD-based breakers
         if self.max_daily_loss_usd > 0 and self.portfolio_realized <= -self.max_daily_loss_usd:
             self._touch_pause(
                 f"circuit breaker: realized pnl {self.portfolio_realized:.6f} <= -{self.max_daily_loss_usd:.6f} USD"
@@ -189,7 +200,7 @@ class RiskEngine:
                         level="block",
                     )
 
-        # A: Max notional per trade
+        # A: Max notional per trade (hard block)
         if notional_usd > self.max_notional_usd_per_trade:
             return RiskDecision(
                 False,
@@ -198,29 +209,36 @@ class RiskEngine:
             )
 
         # C: Trades/day cap -> block + alert (but DO NOT pause)
-        if self.max_trades_per_day > 0 and self.trades_today >= self.max_trades_per_day:
-            return RiskDecision(
-                False,
-                f"ALERT: max trades/day reached ({self.trades_today}/{self.max_trades_per_day})",
-                level="alert",
-            )
-
-        if pair and self.max_trades_per_day_per_pair > 0:
-            pt = self.trades_today_by_pair.get(pair, 0)
-            if pt >= self.max_trades_per_day_per_pair:
+        # Only enforce if live OR count_trades_in_dry_run is enabled.
+        if self._count_trades_for_mode(mode):
+            if self.max_trades_per_day > 0 and self.trades_today >= self.max_trades_per_day:
                 return RiskDecision(
                     False,
-                    f"ALERT: max trades/day per pair reached ({pair}: {pt}/{self.max_trades_per_day_per_pair})",
+                    f"ALERT: max trades/day reached ({self.trades_today}/{self.max_trades_per_day})",
                     level="alert",
                 )
 
+            if pair and self.max_trades_per_day_per_pair > 0:
+                pt = self.trades_today_by_pair.get(pair, 0)
+                if pt >= self.max_trades_per_day_per_pair:
+                    return RiskDecision(
+                        False,
+                        f"ALERT: max trades/day per pair reached ({pair}: {pt}/{self.max_trades_per_day_per_pair})",
+                        level="alert",
+                    )
+
         return RiskDecision(True, "ok", level="block")
 
-    def record_trade(self, pair: Optional[str] = None):
+    def record_trade(self, pair: Optional[str] = None, mode: str = "dry_run"):
         """
         Call ONLY when a trade is considered "executed" (dry-run filled, or live placed).
+        If count_trades_in_dry_run is false, dry-run trades will not consume the daily caps.
         """
         self._roll_day_if_needed()
+
+        if not self._count_trades_for_mode(mode):
+            return
+
         self.trades_today += 1
         if pair:
             self.trades_today_by_pair[pair] = self.trades_today_by_pair.get(pair, 0) + 1

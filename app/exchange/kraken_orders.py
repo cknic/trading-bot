@@ -210,6 +210,7 @@ def place_or_preview(
 
     if od.mode != "live":
         od.reason = "dry-run"
+        risk.record_trade(pair_key, mode=od.mode)
         return od, metrics
 
     # Live protections
@@ -227,7 +228,7 @@ def place_or_preview(
         return od, metrics
 
     # Count the trade as executed for rate limiting
-    risk.record_trade(pair_key)
+    risk.record_trade(pair_key, mode=od.mode)
 
     od.reason = "LIVE order placed"
     return od, metrics
