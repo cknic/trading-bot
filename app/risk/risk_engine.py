@@ -8,24 +8,27 @@ from typing import Optional, Dict, Any
 class RiskDecision:
     allowed: bool
     reason: str
+    # For UI / events: "block" (hard reject), "alert" (blocked but should alert)
+    level: str = "block"
 
 
 class RiskEngine:
     """
     Enforces:
       - pause/kill file controls
-      - max trades/day (global and per pair)
-      - max_notional_usd_per_trade (per trade)
-      - circuit breakers based on portfolio realized PnL (USD) and max drawdown (USD)
+      - max trades/day (global and per pair)  [C: block+alert, no auto-pause]
+      - max_notional_usd_per_trade (per trade) [A]
+      - max_open_positions (portfolio-level)   [A]
+      - circuit breakers based on portfolio realized PnL and drawdown (USD-based) [A -> auto-pause]
+      - optional pct-based circuit breaker support if you supply an equity base
 
     NOTE:
-      - circuit breaker inputs come from pnl_analytics output (pnl.json), which is USD-based.
-      - pause is "soft stop": no trades, but bot continues to run/log/update analytics.
+      - portfolio metrics are fed from pnl_analytics output (pnl.json), USD-based today.
+      - pause is "soft stop": no trades, bot keeps running/logging.
     """
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
-
         self.fail_closed = bool(cfg.get("safety", {}).get("fail_closed", True))
 
         # Controls
@@ -35,14 +38,24 @@ class RiskEngine:
 
         # Trade limits
         trade = cfg.get("trade", {})
+        self.max_open_positions = int(trade.get("max_open_positions", 0))  # 0 = disabled
         self.max_notional_usd_per_trade = float(trade.get("max_notional_usd_per_trade", 20.0))
-        self.max_trades_per_day = int(trade.get("max_trades_per_day", 3))
-        self.max_trades_per_day_per_pair = int(trade.get("max_trades_per_day_per_pair", self.max_trades_per_day))
 
-        # Circuit breakers (USD-based, sourced from pnl.json)
+        # Trades/day caps
+        self.max_trades_per_day = int(trade.get("max_trades_per_day", 3))
+        self.max_trades_per_day_per_pair = int(
+            trade.get("max_trades_per_day_per_pair", self.max_trades_per_day)
+        )
+
+        # Circuit breakers (USD-based today, sourced from pnl.json)
         account = cfg.get("account", {})
         self.max_daily_loss_usd = float(account.get("max_daily_loss_usd", 0.0))
         self.max_drawdown_usd = float(account.get("max_drawdown_usd", 0.0))
+
+        # Optional pct-based (only used if >0 AND equity_base_usd > 0)
+        self.max_daily_loss_pct = float(account.get("max_daily_loss_pct", 0.0))
+        self.max_drawdown_pct = float(account.get("max_drawdown_pct", 0.0))
+        self.equity_base_usd = float(account.get("equity_base_usd", 0.0))  # optional
 
         # Daily counters (UTC)
         self.day_key = self._utc_day_key()
@@ -51,11 +64,18 @@ class RiskEngine:
 
         # Latest portfolio metrics (fed from pnl_analytics)
         self.portfolio_realized = 0.0
-        self.portfolio_max_dd = 0.0
+        self.portfolio_max_dd = 0.0  # drawdown USD
+
+        # Latest position metrics (fed from main/ledger)
+        self.open_positions: Optional[int] = None
+        self.open_positions_ts: int = 0
 
         # Sticky pause reason (also mirrors to pause_file)
         self.pause_reason: Optional[str] = None
 
+    # -----------------
+    # Internals
+    # -----------------
     def _utc_day_key(self) -> str:
         return time.strftime("%Y-%m-%d", time.gmtime())
 
@@ -66,7 +86,9 @@ class RiskEngine:
             self.trades_today = 0
             self.trades_today_by_pair = {}
 
-    # --- Control state ---
+    # -----------------
+    # Control state
+    # -----------------
     def kill_switch_active(self) -> bool:
         return os.path.exists(self.kill_file)
 
@@ -90,54 +112,109 @@ class RiskEngine:
             # If we cannot write pause file, we still keep pause_reason in memory.
             pass
 
-    # --- Circuit breakers ---
+    # -----------------
+    # Metrics updates
+    # -----------------
     def update_portfolio_metrics(self, realized_pnl_usd: float, max_drawdown_usd: float):
         """
         Called from main loop after pnl_analytics runs.
-        If circuit breakers are hit, trading is paused.
+        If circuit breakers are hit, trading is paused (A behavior).
         """
         self.portfolio_realized = float(realized_pnl_usd)
         self.portfolio_max_dd = float(max_drawdown_usd)
 
+        # USD-based breakers (existing behavior)
         if self.max_daily_loss_usd > 0 and self.portfolio_realized <= -self.max_daily_loss_usd:
             self._touch_pause(
-                f"circuit breaker: realized pnl {self.portfolio_realized:.6f} <= -{self.max_daily_loss_usd:.6f}"
+                f"circuit breaker: realized pnl {self.portfolio_realized:.6f} <= -{self.max_daily_loss_usd:.6f} USD"
             )
             return
 
         if self.max_drawdown_usd > 0 and self.portfolio_max_dd >= self.max_drawdown_usd:
             self._touch_pause(
-                f"circuit breaker: max drawdown {self.portfolio_max_dd:.6f} >= {self.max_drawdown_usd:.6f}"
+                f"circuit breaker: max drawdown {self.portfolio_max_dd:.6f} >= {self.max_drawdown_usd:.6f} USD"
             )
             return
 
-    # --- Core gating ---
+        # Optional pct-based breakers (only if equity_base_usd is provided)
+        if self.equity_base_usd > 0:
+            if self.max_daily_loss_pct > 0:
+                daily_loss_usd = -min(self.portfolio_realized, 0.0)
+                daily_loss_pct = (daily_loss_usd / self.equity_base_usd) * 100.0
+                if daily_loss_pct >= self.max_daily_loss_pct:
+                    self._touch_pause(
+                        f"circuit breaker: daily loss {daily_loss_pct:.4f}% >= {self.max_daily_loss_pct:.4f}%"
+                    )
+                    return
+
+            if self.max_drawdown_pct > 0:
+                dd_pct = (self.portfolio_max_dd / self.equity_base_usd) * 100.0
+                if dd_pct >= self.max_drawdown_pct:
+                    self._touch_pause(
+                        f"circuit breaker: drawdown {dd_pct:.4f}% >= {self.max_drawdown_pct:.4f}%"
+                    )
+                    return
+
+    def update_open_positions(self, open_positions: int):
+        """Caller (main) should provide current open positions count."""
+        self.open_positions = int(open_positions)
+        self.open_positions_ts = int(time.time())
+
+    # -----------------
+    # Core gating
+    # -----------------
     def can_trade(self, notional_usd: float, mode: str, pair: Optional[str] = None) -> RiskDecision:
         """
         Used by exchange layer before placing/previewing.
-        This MUST be conservative (block if uncertain).
+        Conservative: if info is required and missing and fail_closed=True, block.
         """
         self._roll_day_if_needed()
 
         if self.kill_switch_active():
-            return RiskDecision(False, "kill switch active")
+            return RiskDecision(False, "kill switch active", level="block")
 
         if self.paused():
-            return RiskDecision(False, f"paused: {self.get_pause_reason()}")
+            return RiskDecision(False, f"paused: {self.get_pause_reason()}", level="block")
 
+        # A: Max open positions (hard block)
+        if self.max_open_positions > 0:
+            if self.open_positions is None:
+                if self.fail_closed:
+                    return RiskDecision(False, "open positions unknown (fail-closed)", level="block")
+            else:
+                if self.open_positions >= self.max_open_positions:
+                    return RiskDecision(
+                        False,
+                        f"max_open_positions reached ({self.open_positions}/{self.max_open_positions})",
+                        level="block",
+                    )
+
+        # A: Max notional per trade
         if notional_usd > self.max_notional_usd_per_trade:
-            return RiskDecision(False, f"max_notional_usd_per_trade exceeded ({notional_usd:.2f} > {self.max_notional_usd_per_trade:.2f})")
+            return RiskDecision(
+                False,
+                f"max_notional_usd_per_trade exceeded ({notional_usd:.2f} > {self.max_notional_usd_per_trade:.2f})",
+                level="block",
+            )
 
-        # Trade caps apply to both dry_run and live
-        if self.trades_today >= self.max_trades_per_day:
-            return RiskDecision(False, f"max trades/day reached ({self.trades_today}/{self.max_trades_per_day})")
+        # C: Trades/day cap -> block + alert (but DO NOT pause)
+        if self.max_trades_per_day > 0 and self.trades_today >= self.max_trades_per_day:
+            return RiskDecision(
+                False,
+                f"ALERT: max trades/day reached ({self.trades_today}/{self.max_trades_per_day})",
+                level="alert",
+            )
 
-        if pair:
+        if pair and self.max_trades_per_day_per_pair > 0:
             pt = self.trades_today_by_pair.get(pair, 0)
             if pt >= self.max_trades_per_day_per_pair:
-                return RiskDecision(False, f"max trades/day per pair reached ({pair}: {pt}/{self.max_trades_per_day_per_pair})")
+                return RiskDecision(
+                    False,
+                    f"ALERT: max trades/day per pair reached ({pair}: {pt}/{self.max_trades_per_day_per_pair})",
+                    level="alert",
+                )
 
-        return RiskDecision(True, "ok")
+        return RiskDecision(True, "ok", level="block")
 
     def record_trade(self, pair: Optional[str] = None):
         """
