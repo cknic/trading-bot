@@ -1,5 +1,15 @@
 {
   "boot_ts": 1766782879,
+  "cooldowns": {
+    "XETHZUSD": {
+      "cooldown_until": 1766798156,
+      "remaining_s": 7895
+    },
+    "XXBTZUSD": {
+      "cooldown_until": 1766789917,
+      "remaining_s": 0
+    }
+  },
   "killed": false,
   "last_error": "",
   "last_loop_ok": true,
@@ -8,7 +18,10 @@
   "latch_required": true,
   "live_allowed": false,
   "mode_config": "live",
-  "note": "boot",
+  "pairs": [
+    "XXBTZUSD",
+    "XETHZUSD"
+  ],
   "paused": false,
-  "ts": 1766782879
+  "ts": 1766790261
 }
