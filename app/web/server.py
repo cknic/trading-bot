@@ -649,11 +649,20 @@ function toggleToken() {
 async function api(path, opts={}) {
   const token = getToken();
   const headers = Object.assign({"Content-Type":"application/json"}, (opts.headers||{}));
-  if (token) headers["Authorization"] = "Bearer " + token;
+  if (token) {
+    headers["Authorization"] = "Bearer " + token;
+  } else {
+    console.warn("Calling API without token on", path);
+  }
   const res = await fetch(path, Object.assign({}, opts, {headers}));
   const txt = await res.text();
-  let data; try { data = JSON.parse(txt); } catch(e) { data = {raw: txt}; }
-  if (!res.ok) throw new Error((data && data.detail) ? data.detail : ("HTTP " + res.status));
+  let data;
+  try { data = JSON.parse(txt); }
+  catch(e) { data = {raw: txt}; }
+  if (!res.ok) {
+    console.error("API error", path, res.status, data);
+    throw new Error((data && data.detail) ? data.detail : ("HTTP " + res.status));
+  }
   return data;
 }
 function money(x) {
