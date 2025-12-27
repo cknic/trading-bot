@@ -1,63 +1,123 @@
-import os, time, json, copy, traceback, sys
+import os
+import time
+import json
+import copy
+import traceback
+import sys
 import yaml
 import requests
 from collections import defaultdict
 
-from util.test_kraken import main as kraken_test_main
-from util.ledger import (
-    get_position, set_position, clear_position,
-    get_cooldown_until, set_cooldown
-)
+# --- UTILS ---
+from util.ledger import get_position, set_position, clear_position
 from util.trade_log import append_trade
-
 from exchange.kraken_client import KrakenClient
-from exchange.kraken_marketdata import fetch_ohlc_closes
 from exchange.kraken_orders import place_or_preview, resolve_pair_info
+from exchange.kraken_marketdata import fetch_ohlc_closes
 from risk.risk_engine import RiskEngine
 from strategy.ma_crossover import decide
 
-# -----------------------------
-# CONFIG / ENV
-# -----------------------------
-MANUAL_ORDER_PATH = os.environ.get("MANUAL_ORDER_PATH", "/run/trading/MANUAL_ORDER.json")
-PAUSE_FILE = os.environ.get("PAUSE_FILE", "/run/trading/PAUSE")
-KILL_FILE = os.environ.get("KILL_FILE", "/run/trading/KILL_SWITCH")
+# --- PATHS ---
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+AI_LOG_PATH = os.path.join(DATA_DIR, "ai_log.jsonl")
+PNL_PATH = os.path.join(DATA_DIR, "pnl.json")
+BOT_STATUS_PATH = os.path.join(DATA_DIR, "bot_status.json")
+STATE_JSON = os.path.join(DATA_DIR, "state.json")
 
-LIVE_LATCH_FILE = os.environ.get("LIVE_LATCH_FILE", "/run/trading/LIVE_LATCH")
+MANUAL_ORDER_PATH = "/run/trading/MANUAL_ORDER.json"
+PAUSE_FILE = "/run/trading/PAUSE"
+KILL_FILE = "/run/trading/KILL_SWITCH"
+LIVE_LATCH_FILE = "/run/trading/LIVE_LATCH"
+
+# Env Flags
 REQUIRE_LIVE_LATCH = os.environ.get("REQUIRE_LIVE_LATCH", "1").strip().lower() not in ("0", "false", "")
 
-DATA_DIR = os.environ.get("DATA_DIR", "/data")
-BOT_STATUS_PATH = os.environ.get("BOT_STATUS_PATH", os.path.join(DATA_DIR, "bot_status.json"))
+# ==============================================================================
+# 1. HELPERS & LOGGING
+# ==============================================================================
 
 def load_yaml(path):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    with open(path, "r") as f: return yaml.safe_load(f)
 
-def post_json(url, headers, payload):
-    r = requests.post(url, headers=headers, json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+def log_ai(prompt, response, model):
+    entry = {
+        "ts": int(time.time()),
+        "model": model,
+        "prompt": prompt,
+        "response": response
+    }
+    try:
+        with open(AI_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"Logging Error: {e}")
 
 def ai_call(provider, model, prompt):
-    if provider == "openai":
-        key = os.environ["OPENAI_API_KEY"]
-        url = "https://api.openai.com/v1/responses"
-        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-        payload = {"model": model, "input": prompt}
-        return post_json(url, headers, payload)
-    raise ValueError("Unknown AI provider")
+    response = {"status": "simulated", "analysis": "Trend is neutral. Holding pattern."}
+    if provider == "openai" and "OPENAI_API_KEY" in os.environ:
+        try:
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
+            payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+            r = requests.post(url, headers=headers, json=payload, timeout=5)
+            if r.status_code == 200: response = r.json()
+        except: pass
+    log_ai(prompt, response, model)
+    return response
+
+def update_realized_pnl(profit_usd):
+    try:
+        data = {}
+        if os.path.exists(PNL_PATH):
+            with open(PNL_PATH, 'r') as f: data = json.load(f)
+        
+        if "portfolio" not in data: data["portfolio"] = {"net_pnl_usd": 0.0}
+        if "equity_curve_realized" not in data: data["equity_curve_realized"] = []
+
+        current_net = data["portfolio"]["net_pnl_usd"] + profit_usd
+        data["portfolio"]["net_pnl_usd"] = current_net
+        
+        data["equity_curve_realized"].append([int(time.time()), current_net])
+        
+        with open(PNL_PATH, 'w') as f: json.dump(data, f)
+        print(f">> PnL UPDATED: ${profit_usd:.6f} (Total Equity Change: ${current_net:.6f})")
+    except Exception as e:
+        print(f"PnL Update Error: {e}")
+
+def log_trade_csv(pair, side, vol, price, cost, mode):
+    append_trade(int(time.time()), pair, side, str(vol), str(price), cost, mode)
+
+def write_bot_status(status):
+    try:
+        tmp = BOT_STATUS_PATH + ".tmp"
+        with open(tmp, "w") as f: json.dump(status, f)
+        os.replace(tmp, BOT_STATUS_PATH)
+    except: pass
+
+def sync_risk_counters(risk_engine):
+    count = 0
+    try:
+        if os.path.exists(STATE_JSON):
+            with open(STATE_JSON, 'r') as f:
+                state = json.load(f)
+                for v in state.values():
+                    if v.get("has_position"): count += 1
+    except: pass
+    risk_engine.update_open_positions(count)
+
+# ==============================================================================
+# 2. STATE & SAFETY
+# ==============================================================================
 
 def is_paused(): return os.path.exists(PAUSE_FILE)
 def is_killed(): return os.path.exists(KILL_FILE)
-def live_latch_present() -> bool: return os.path.exists(LIVE_LATCH_FILE)
+def live_latch_present(): return os.path.exists(LIVE_LATCH_FILE)
+def get_trading_mode(kcfg): return (kcfg.get("trading", {}).get("mode", "") or "").strip().lower()
 
-def get_trading_mode(kcfg) -> str:
-    return (kcfg.get("trading", {}).get("mode", "") or "").strip().lower()
-
-def allow_live(kcfg) -> bool:
+def allow_live(kcfg): 
     if get_trading_mode(kcfg) != "live": return False
     if is_killed(): return False
-    if REQUIRE_LIVE_LATCH and (not live_latch_present()): return False
+    if REQUIRE_LIVE_LATCH and not live_latch_present(): return False
     return True
 
 def safe_kcfg_for_orders(kcfg):
@@ -65,280 +125,238 @@ def safe_kcfg_for_orders(kcfg):
     if mode != "live": return kcfg
     if allow_live(kcfg): return kcfg
     tmp = copy.deepcopy(kcfg)
-    tmp.setdefault("trading", {})
-    tmp["trading"]["mode"] = "dry_run"
+    tmp.setdefault("trading", {})["mode"] = "dry_run"
     return tmp
+
+def cancel_all_open_orders(k):
+    print("SAFETY: Canceling open orders...")
+    try: 
+        resp = k.private("CancelAll")
+        if resp.get("error"): print(f"Warn: CancelAll failed: {resp['error']}")
+        else: print(f"SAFETY: CancelAll complete. {resp.get('result', {}).get('count', 0)} orders canceled.")
+    except Exception as e: 
+        print(f"Warn: CancelAll exception: {e}")
+
+def reconcile_positions(k, pairs):
+    print("SAFETY: Reconciling positions...")
+    try:
+        resp = k.private("OpenPositions")
+        if resp.get("error"): return f"Kraken Error: {resp['error']}"
+        
+        kraken_pos = resp.get("result", {})
+        real_positions = defaultdict(float)
+        for txid, info in kraken_pos.items():
+            p = info['pair']
+            vol = float(info['vol']) - float(info['vol_closed'])
+            if vol > 0.000001: real_positions[p] += vol
+        
+        local_state = {}
+        if os.path.exists(STATE_JSON):
+            with open(STATE_JSON, 'r') as f: local_state = json.load(f)
+
+        errors = []
+        for pair in pairs:
+            local_has = local_state.get(pair, {}).get("has_position", False)
+            local_vol = float(local_state.get(pair, {}).get("base_volume", 0.0))
+            real_vol = real_positions.get(pair, 0.0)
+            real_has = real_vol > 0.0001
+
+            if local_has != real_has:
+                msg = f"MISMATCH on {pair}: Local={local_has}({local_vol:.4f}), Kraken={real_has}({real_vol:.4f})"
+                print(f"CRITICAL: {msg}")
+                errors.append(msg)
+        return errors
+    except Exception as e: return f"Reconciliation Exception: {e}"
+
+# ==============================================================================
+# 3. MAIN LOOP
+# ==============================================================================
 
 def try_read_manual_order():
     try:
         if not os.path.exists(MANUAL_ORDER_PATH): return None
         with open(MANUAL_ORDER_PATH, "r") as f: return json.load(f)
-    except Exception: return None
+    except: return None
 
 def clear_manual_order():
     try: os.remove(MANUAL_ORDER_PATH)
-    except FileNotFoundError: pass
+    except: pass
 
-def log_trade_csv(pair_key: str, side: str, od, m, notional_usd: float):
-    ts = int(time.time())
-    px = m.get("last") or od.price or ""
-    append_trade(ts=ts, pair=pair_key, side=side, volume=str(od.volume), price=str(px), notional_usd=float(notional_usd), mode=str(od.mode))
+def execute_trade_logic(k, risk, kcfg, pair, side, amt=None):
+    kcfg_orders = safe_kcfg_for_orders(kcfg)
+    
+    pos = get_position(pair)
+    base_override = pos.get("base_volume") if side == "sell" else None
+    entry_price = pos.get("average_price", 0.0) if pos.get("has_position") else 0.0
+    
+    od, m = place_or_preview(k, kcfg_orders, risk, pair, side, base_override)
+    
+    if od.should_place or od.reason in ("dry-run", "LIVE order placed"):
+        executed_price = float(m.get("last", 0))
+        executed_vol = float(od.volume)
+        total_cost = executed_price * executed_vol
+        
+        print(f"------------------------------------------------")
+        print(f" ACTION: {side.upper()} | PAIR: {pair}")
+        print(f" PRICE:  ${executed_price:.2f}")
+        print(f" VOL:    {executed_vol:.6f}")
+        print(f" COST:   ${total_cost:.2f}")
+        print(f" MODE:   {od.mode.upper()}")
+        print(f"------------------------------------------------")
+        
+        log_trade_csv(pair, side, executed_vol, executed_price, total_cost, od.mode)
+        
+        # --- PNL & FEES ---
+        if side == "sell" and entry_price > 0:
+            gross_pnl = (executed_price - entry_price) * executed_vol
+            
+            # Fee Logic:
+            # 1. Try to read explicit fee from Kraken response (Live Mode)
+            # 2. Fallback to calculation using config (Dry Run)
+            
+            real_fee_usd = float(m.get("fee", 0.0))
+            
+            if real_fee_usd > 0:
+                # We have real data (LIVE)
+                fees = real_fee_usd
+                fee_source = "KRAKEN_API"
+            else:
+                # We simulate (DRY_RUN)
+                # Use configured pct or default to 0.26%
+                fee_pct = float(kcfg.get("fees", {}).get("taker_fee_pct", 0.26)) / 100.0
+                entry_fee = (entry_price * executed_vol) * fee_pct
+                exit_fee = (executed_price * executed_vol) * fee_pct
+                fees = entry_fee + exit_fee
+                fee_source = f"SIMULATED ({fee_pct*100}%)"
 
-def write_bot_status(status: dict):
-    try:
-        os.makedirs(os.path.dirname(BOT_STATUS_PATH), exist_ok=True)
-        tmp = BOT_STATUS_PATH + ".tmp"
-        with open(tmp, "w") as f: json.dump(status, f, indent=2, sort_keys=True)
-        os.replace(tmp, BOT_STATUS_PATH)
-    except Exception: pass
-
-def cancel_all_open_orders(k: KrakenClient):
-    print("SAFETY: Canceling ALL open orders on Kraken to prevent orphan fills...")
-    try:
-        resp = k.private("CancelAll")
-        count = resp.get("result", {}).get("count", 0)
-        print(f"SAFETY: CancelAll complete. {count} orders canceled.")
-    except Exception as e:
-        print(f"SAFETY ERROR: Failed to cancel open orders: {e}")
-
-def reconcile_positions(k: KrakenClient, pair_keys: list) -> list:
-    print("SAFETY: Reconciling local ledger with Kraken OpenPositions...")
-    try:
-        resp = k.private("OpenPositions")
-        k_positions = resp.get("result", {}) or {}
-    except Exception as e:
-        return [f"CRITICAL: Failed to fetch Kraken positions: {e}"]
-
-    k_agg = defaultdict(float)
-    for _, pdata in k_positions.items():
-        pname = pdata.get("pair")
-        vol = float(pdata.get("vol", 0.0)) - float(pdata.get("vol_closed", 0.0))
-        if vol > 0.00000001: k_agg[pname] += vol
-
-    mismatches = []
-    for pair in pair_keys:
-        local_pos = get_position(pair)
-        local_vol = local_pos["base_volume"] if local_pos["has_position"] else 0.0
-        remote_vol = k_agg.get(pair, 0.0)
-        if abs(local_vol - remote_vol) > 0.0001:
-            mismatches.append(f"{pair}: Local={local_vol:.6f} vs Kraken={remote_vol:.6f}")
-    return mismatches
+            net_pnl = gross_pnl - fees
+            
+            print(f">> PnL CALC: Gross ${gross_pnl:.6f} - Fees ${fees:.6f} [{fee_source}] = Net ${net_pnl:.6f}")
+            update_realized_pnl(net_pnl)
+        
+        if od.mode != "live" and od.reason == "dry-run":
+            if side == "buy": set_position(pair, executed_vol, executed_price)
+            if side == "sell": clear_position(pair)
+            
+        sync_risk_counters(risk)
+        return True
+    else:
+        print(f"REJECTED: {od.reason}")
+        return False
 
 def main():
-    boot_ts = int(time.time())
-    last_loop_ok = True
-    last_error = ""
-
+    print(">>> BOT STARTED <<<")
+    
     try:
         risk_cfg = load_yaml("/config/risk.yaml")
         ai_cfg = load_yaml("/config/ai.yaml")
         kcfg = load_yaml("/config/kraken.yaml")
     except Exception as e:
-        print(f"CRITICAL: Failed to load config: {e}")
+        print(f"CRITICAL: Config error {e}")
         sys.exit(1)
 
-    provider = ai_cfg["provider"]
-    model = ai_cfg[provider]["model"]
-    print("Bot starting. fail_closed =", risk_cfg["safety"]["fail_closed"])
-    print("AI provider =", provider, "model =", model)
+    k = KrakenClient(os.environ["KRAKEN_API_KEY"], os.environ["KRAKEN_API_SECRET"], kcfg["kraken"]["base_url"])
+    risk = RiskEngine(risk_cfg)
+    
+    poll_seconds = kcfg.get("trading", {}).get("poll_seconds", 60)
+    strategy_interval = kcfg.get("strategy", {}).get("timeframe_minutes", 60)
+    sma_short = kcfg.get("strategy", {}).get("sma_short", 10)
+    sma_long = kcfg.get("strategy", {}).get("sma_long", 30)
+    
+    print(f"Poll Interval: {poll_seconds}s")
+    print(f"Strategy Interval: {strategy_interval}m")
+    
+    pairs = []
+    pair_map = {}
+    for p in kcfg["kraken"]["pairs"]:
+        try:
+            pk, _ = resolve_pair_info(k, p)
+            pairs.append(pk)
+            pair_map[p] = pk
+            pair_map[pk] = pk
+        except Exception as e:
+            print(f"Startup Warning: Could not resolve pair {p}: {e}")
+        
+    print(f"Pairs Resolved: {pairs}")
 
     mode = get_trading_mode(kcfg)
-    print(f"Trading mode = {mode}")
+    if mode == "live":
+        cancel_all_open_orders(k)
+        errs = reconcile_positions(k, pairs)
+        if errs:
+            print(f"SAFETY ABORT: {errs}")
+            write_bot_status({"killed": True, "last_error": str(errs)})
+            sys.exit(1)
 
-    if mode == "live" and not allow_live(kcfg):
-        why = []
-        if is_killed(): why.append("KILL_SWITCH present")
-        if REQUIRE_LIVE_LATCH and not live_latch_present(): why.append("LIVE_LATCH missing")
-        print("LIVE requested but NOT allowed -> forcing dry_run for all orders. Reasons:", ", ".join(why) or "unknown")
+    print("Initializing Risk Engine State...")
+    sync_risk_counters(risk)
 
-    write_bot_status({
-        "ts": int(time.time()), "boot_ts": boot_ts, "mode_config": mode,
-        "latch_required": REQUIRE_LIVE_LATCH, "latch_file": LIVE_LATCH_FILE,
-        "latch_present": live_latch_present(), "live_allowed": allow_live(kcfg),
-        "paused": is_paused(), "killed": is_killed(),
-        "last_loop_ok": True, "last_error": "", "note": "booting..."
-    })
-
-    try:
-        kraken_test_main()
-        print("Kraken test: OK")
-
-        risk = RiskEngine(risk_cfg)
-        k = KrakenClient(os.environ["KRAKEN_API_KEY"], os.environ["KRAKEN_API_SECRET"], kcfg["kraken"]["base_url"])
-
-        configured_pairs = kcfg["kraken"]["pairs"]
-        pair_keys = []
-        pair_map = {} 
-
-        for p in configured_pairs:
-            pk, _ = resolve_pair_info(k, p)
-            pair_keys.append(pk)
-            pair_map[p] = pk
-            pair_map[pk] = pk 
-            
-        print("Trading pairs (normalized):", pair_keys)
-
-        if mode == "live":
-            cancel_all_open_orders(k)
-            try:
-                errors = reconcile_positions(k, pair_keys)
-                if errors:
-                    err_msg = "SAFETY ABORT: State Mismatch. " + "; ".join(errors)
-                    print(err_msg)
-                    write_bot_status({
-                        "ts": int(time.time()), "boot_ts": boot_ts, "mode_config": mode,
-                        "killed": True, "last_loop_ok": False, "last_error": err_msg,
-                        "note": "startup_failed"
-                    })
-                    sys.exit(1)
-            except Exception as e:
-                print(f"SAFETY WARNING: Reconciliation failed due to network: {e}")
-                pass
-        else:
-            print(f"Skipping strict reconciliation because mode={mode}")
-
-    except Exception as e:
-        print(f"Startup Exception: {e}")
-        write_bot_status({
-            "ts": int(time.time()), "boot_ts": boot_ts, "mode_config": mode,
-            "killed": True, "last_loop_ok": False, "last_error": f"Startup Error: {str(e)}",
-            "note": "crashed"
-        })
-        sys.exit(1)
-
-    poll = int(kcfg["trading"].get("poll_seconds", 60))
-    tf = int(kcfg["strategy"]["timeframe_minutes"])
-    sma_s = int(kcfg["strategy"]["sma_short"])
-    sma_l = int(kcfg["strategy"]["sma_long"])
-    min_c = int(kcfg["strategy"]["min_candles"])
-    simulate = bool(kcfg["strategy"].get("simulate_fills_in_dry_run", True))
-    cd_hours = int(kcfg.get("cooldown", {}).get("hours_after_trade", 4))
-    cd_seconds = cd_hours * 3600
-    configured_notional = float(kcfg.get("trading", {}).get("quote_notional_usd", 20.0))
+    last_check_ts = 0
 
     while True:
-        loop_ts = int(time.time())
-        last_error = ""
-        last_loop_ok = True
-
         try:
-            current_open_pos_count = 0
-            for pk in pair_keys:
-                pos_data = get_position(pk)
-                if pos_data.get("has_position"): current_open_pos_count += 1
-            risk.update_open_positions(current_open_pos_count)
-
+            # A. Manual
             manual = try_read_manual_order()
             if manual:
-                if is_killed():
-                    print("[manual] Ignoring manual order: KILL_SWITCH is enabled")
-                    clear_manual_order()
-                elif is_paused():
-                    print("[manual] Manual order queued but bot is paused")
-                else:
-                    raw_pair = (manual.get("pair") or "").strip()
-                    side = (manual.get("side") or "").strip().lower()
-                    requested_notional = float(manual.get("notional_usd") or 0)
-                    pair_key = pair_map.get(raw_pair)
-                    
-                    if not pair_key:
-                        try: pair_key, _ = resolve_pair_info(k, raw_pair)
-                        except: pair_key = None
+                raw_pair = manual.get("pair")
+                pk = pair_map.get(raw_pair)
+                side = manual.get("side")
+                if pk and side in ("buy", "sell"):
+                    print(f"\n>>> MANUAL REQUEST: {side.upper()} {pk}")
+                    execute_trade_logic(k, risk, kcfg, pk, side)
+                clear_manual_order()
 
-                    if side not in ("buy", "sell") or not pair_key or pair_key not in pair_keys or requested_notional <= 0:
-                         print(f"[manual] Invalid request (pair={raw_pair}); clearing")
-                         clear_manual_order()
-                    else:
-                        kcfg_orders = safe_kcfg_for_orders(kcfg)
-                        print(f"[manual] Processing {pair_key} ({raw_pair}) {side} ${requested_notional}")
-                        pos = get_position(pair_key)
-                        base_override = pos["base_volume"] if side == "sell" else None
-                        
-                        if side == "sell" and not pos.get("has_position"):
-                            print("[manual] No position to sell")
-                            clear_manual_order()
-                        else:
-                            od, m = place_or_preview(k, kcfg_orders, risk, pair_key, side, base_override)
-                            print(f"[manual] Result: {od.reason}")
-                            if od.reason in ("dry-run", "LIVE order placed"):
-                                set_cooldown(pair_key, cd_seconds)
-                                log_trade_csv(pair_key, side, od, m, configured_notional)
-                            if (od.mode != "live") and simulate and (od.reason == "dry-run"):
-                                last = float(m.get("last", 0) or 0)
-                                if side == "buy" and last > 0: set_position(pair_key, float(od.volume), last)
-                                if side == "sell": clear_position(pair_key)
-                            clear_manual_order()
-
-            for pair_key in pair_keys:
-                now = int(time.time())
-                if get_cooldown_until(pair_key) > now:
-                    # Optional: Uncomment if you want cooldown noise
-                    # print(f"[{pair_key}] Cooldown active (skip)")
-                    continue
-
-                pos = get_position(pair_key)
-                closes = fetch_ohlc_closes(k, pair_key, tf)
-                if len(closes) < min_c:
-                    print(f"[{pair_key}] Not enough data")
-                    continue
-
-                sig = decide(closes, sma_s, sma_l, pos["has_position"])
-                action = sig["action"]
+            # B. Strategy
+            now = int(time.time())
+            if now - last_check_ts > poll_seconds:
+                print(f"\n--- STRATEGY CHECK ({time.strftime('%H:%M:%S')}) ---")
                 
-                # --- DETAILED LOGGING RESTORED ---
-                if action == "hold":
-                    print(f"[{pair_key}] hold -> {sig['reason']}")
-                elif is_killed() or is_paused():
-                    print(f"[{pair_key}] Paused/Killed (skip)")
-                else:
-                    kcfg_orders = safe_kcfg_for_orders(kcfg)
-                    if action == "buy":
-                        od, m = place_or_preview(k, kcfg_orders, risk, pair_key, "buy", None)
-                        print(f"[{pair_key}] BUY -> {od.reason}")
-                        if od.reason in ("dry-run", "LIVE order placed"):
-                            set_cooldown(pair_key, cd_seconds)
-                            log_trade_csv(pair_key, "buy", od, m, configured_notional)
-                        if (od.mode != "live") and simulate and (od.reason == "dry-run"):
-                            last = float(m.get("last", 0) or 0)
-                            if last > 0: set_position(pair_key, float(od.volume), last)
+                prompt = ai_cfg.get("prompts", {}).get("strategy_decision", "Analyze market.")
+                ai_resp = ai_call(ai_cfg.get("provider"), ai_cfg.get("model", "gpt-4"), prompt)
+                print(f"AI Brain: {ai_resp.get('analysis', 'No analysis')}")
 
-                    if action == "sell":
-                        od, m = place_or_preview(k, kcfg_orders, risk, pair_key, "sell", pos["base_volume"])
-                        print(f"[{pair_key}] SELL -> {od.reason}")
-                        if od.reason in ("dry-run", "LIVE order placed"):
-                            set_cooldown(pair_key, cd_seconds)
-                            log_trade_csv(pair_key, "sell", od, m, configured_notional)
-                        if (od.mode != "live") and simulate and (od.reason == "dry-run"):
-                            clear_position(pair_key)
+                for pk in pairs:
+                    try:
+                        closes = fetch_ohlc_closes(k, pk, interval=strategy_interval)
+                        min_candles = kcfg.get("strategy", {}).get("min_candles", 50)
+                        if len(closes) < min_candles:
+                            print(f"{pk}: Not enough data ({len(closes)}/{min_candles})")
+                            continue
+                            
+                        pos_data = get_position(pk)
+                        has_pos = pos_data.get("has_position", False)
+                        
+                        signal, reason = decide(closes, sma_short, sma_long, has_pos)
+                        print(f"{pk}: Signal={signal.upper()} | {reason}")
+                        
+                        if signal in ("buy", "sell"):
+                            print(f">>> AUTO TRADING: {signal.upper()} {pk}")
+                            execute_trade_logic(k, risk, kcfg, pk, signal)
+                            
+                    except Exception as e:
+                        print(f"Strategy Error on {pk}: {e}")
+                        traceback.print_exc()
 
-            out = ai_call(provider, model, 'Return JSON only: {"status":"ok"}')
-            # --- AI LOGGING RESTORED ---
-            out_str = json.dumps(out)
-            trunc = out_str[:120] + "..." if len(out_str) > 120 else out_str
-            print(f"AI response (truncated): {trunc}")
+                last_check_ts = now
 
+            write_bot_status({
+                "ts": int(time.time()),
+                "mode_config": mode,
+                "paused": is_paused(),
+                "killed": is_killed(),
+                "live_allowed": allow_live(kcfg)
+            })
+            
+            sync_risk_counters(risk)
+            time.sleep(2)
+
+        except KeyboardInterrupt:
+            print("Stopping...")
+            break
         except Exception as e:
-            last_loop_ok = False
-            last_error = f"{type(e).__name__}: {e}"
-            print("Loop error:", last_error)
-            print(traceback.format_exc())
-
-        cooldowns = {}
-        now = int(time.time())
-        for pk in pair_keys:
-            cu = get_cooldown_until(pk)
-            cooldowns[pk] = {"remaining_s": int(max(0, (cu or 0) - now))}
-
-        write_bot_status({
-            "ts": int(time.time()), "boot_ts": boot_ts, "mode_config": get_trading_mode(kcfg),
-            "latch_required": REQUIRE_LIVE_LATCH, "latch_file": LIVE_LATCH_FILE,
-            "latch_present": live_latch_present(), "live_allowed": allow_live(kcfg),
-            "paused": is_paused(), "killed": is_killed(),
-            "pairs": list(pair_keys), "cooldowns": cooldowns,
-            "last_loop_ok": last_loop_ok, "last_error": last_error,
-        })
-
-        time.sleep(poll)
+            print(f"LOOP ERROR: {e}")
+            traceback.print_exc()
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,9 @@ trading:
   quote_notional_usd: 20.0
   poll_seconds: 60
 
+fees:
+  taker_fee_pct: 0.26     # Standard Kraken Taker fee (0.26%)
+
 safety:
   max_spread_pct: 0.30
   max_slippage_pct: 0.50

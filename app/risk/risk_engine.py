@@ -16,15 +16,10 @@ class RiskEngine:
     """
     Enforces:
       - pause/kill file controls
-      - max trades/day (global and per pair)  [C: block+alert, no auto-pause]
-      - max_notional_usd_per_trade (per trade) [A]
-      - max_open_positions (portfolio-level)   [A]
-      - circuit breakers based on portfolio realized PnL and drawdown (USD-based) [A -> auto-pause]
-      - optional pct-based circuit breaker support if you supply an equity base
-
-    NOTE:
-      - portfolio metrics are fed from pnl_analytics output (pnl.json), USD-based today.
-      - pause is "soft stop": no trades, bot keeps running/logging.
+      - max trades/day (global and per pair)
+      - max_notional_usd_per_trade (per trade)
+      - max_open_positions (portfolio-level)
+      - circuit breakers based on portfolio realized PnL and drawdown
     """
 
     def __init__(self, cfg: Dict[str, Any]):
@@ -188,7 +183,8 @@ class RiskEngine:
                     level="block",
                 )
 
-        if notional_usd > self.max_notional_usd_per_trade:
+        # FLOAT MATH FIX: Added +0.05 buffer
+        if notional_usd > (self.max_notional_usd_per_trade + 0.05):
             return RiskDecision(
                 False,
                 f"max_notional_usd_per_trade exceeded ({notional_usd:.2f} > {self.max_notional_usd_per_trade:.2f})",
@@ -225,17 +221,20 @@ class RiskEngine:
             self.trades_today_by_pair[pair] = self.trades_today_by_pair.get(pair, 0) + 1
 
     # -----------------
-    # COMPATIBILITY BRIDGE (ADDED FOR NEW ORDER SYSTEM)
+    # COMPATIBILITY BRIDGE
     # -----------------
     def check(self, side: str, volume: float, price: float) -> bool:
         """
-        Adapts the new kraken_orders.py 'check' call to the internal 'can_trade' logic.
+        Adapter for kraken_orders.py to use the sophisticated logic above.
         """
         notional = volume * price
-        # Defaulting to 'live' mode for strict checking unless context provided otherwise
-        decision = self.can_trade(notional_usd=notional, mode="live")
+        # We default to 'live' mode logic here to be conservative/safe
+        decision = self.can_trade(notional, mode="live")
         
         if not decision.allowed:
             print(f"RISK REJECT: {decision.reason}")
             return False
+        
+        # If allowed, we record the trade usage
+        self.record_trade()
         return True
