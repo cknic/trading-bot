@@ -35,8 +35,6 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
 START_TS = int(time.time())
 
-DEFAULT_PROMPT = "Analyze the market data provided. If the trend is strong and aligns with the SMA crossover, confirm the signal. Otherwise, recommend holding."
-
 # ==============================================================================
 # 2. MODELS
 # ==============================================================================
@@ -54,7 +52,7 @@ class ManualExecuteBody(BaseModel):
 # ==============================================================================
 # 3. APP SETUP
 # ==============================================================================
-app = FastAPI(title="Trading Bot API 9.3", version="9.3")
+app = FastAPI(title="Trading Bot API 9.6", version="9.6")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- HELPERS ---
@@ -88,11 +86,9 @@ def _get_detailed_status():
     bs = _read_json_safe(BOT_STATUS_JSON)
     mode_cfg = (bs.get("mode_config") or "unknown").strip().lower()
     live_allowed = bs.get("live_allowed", False)
-    
     mode_effective = mode_cfg
     if mode_cfg == "live" and not live_allowed:
         mode_effective = "dry_run (safety)"
-
     return {
         "ts": bs.get("ts"),
         "mode_requested": mode_cfg,
@@ -120,17 +116,71 @@ def health(authorization: Optional[str] = Header(default=None)):
         "auth_ok": _auth_ok(authorization)
     }
 
+@app.get("/holdings")
+def get_holdings(authorization: Optional[str] = Header(default=None)):
+    state = _read_json_safe(STATE_JSON)
+    holdings = []
+    total_val_usd = 0.0
+    total_unrealized_usd = 0.0
+    
+    active_pairs = [p for p, data in state.items() if data.get("has_position")]
+    
+    if not active_pairs:
+        return {"items": [], "total_usd": 0.0, "total_unrealized_usd": 0.0}
+
+    price_map = {}
+    try:
+        kcfg = _load_yaml(CONFIG_KRAKEN)
+        base_url = kcfg.get("kraken", {}).get("base_url", "https://api.kraken.com")
+        pair_str = ",".join(active_pairs)
+        url = f"{base_url}/0/public/Ticker?pair={pair_str}"
+        resp = requests.get(url, timeout=3).json()
+        if not resp.get("error"):
+            for k, v in resp.get("result", {}).items():
+                price_map[k] = float(v["c"][0])
+    except: pass
+
+    for pair in active_pairs:
+        data = state[pair]
+        vol = float(data.get("base_volume", 0.0))
+        entry = float(data.get("average_price", 0.0))
+        current_price = price_map.get(pair, entry)
+        
+        val_usd = vol * current_price
+        unrealized = (current_price - entry) * vol
+        pct = ((current_price - entry) / entry) * 100 if entry > 0 else 0.0
+
+        total_val_usd += val_usd
+        total_unrealized_usd += unrealized
+        
+        holdings.append({
+            "pair": pair,
+            "volume": vol,
+            "entry_price": round(entry, 4),
+            "current_price": round(current_price, 4),
+            "value_usd": round(val_usd, 2),
+            "unrealized_usd": round(unrealized, 2),
+            "unrealized_pct": round(pct, 2)
+        })
+        
+    return {
+        "items": holdings, 
+        "total_usd": round(total_val_usd, 2),
+        "total_unrealized_usd": round(total_unrealized_usd, 2)
+    }
+
 @app.get("/equity")
 def equity(authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization)
     p = _read_json_safe(PNL_JSON)
     raw = p.get("equity_curve_realized", [])
-    data = [{"time": x[0], "value": x[1]} for x in raw] if raw else []
+    
+    # Rounded value to 2 decimal places
+    data = [{"time": x[0], "value": round(x[1], 2)} for x in raw] if raw else []
     
     if not data:
         now = int(time.time())
         data = [{"time": now-86400, "value": 0}, {"time": now, "value": 0}]
-        
     return {"items": data}
 
 @app.get("/trades")
@@ -143,12 +193,8 @@ def get_ai_logs(limit: int = 10):
 
 @app.get("/config/ai")
 def get_ai_config():
-    """Returns the current config, OR a default if missing."""
     cfg = _load_yaml(AI_CONFIG_PATH)
-    if not cfg:
-        return {"prompts": {"strategy_decision": DEFAULT_PROMPT}}
-    if "prompts" not in cfg:
-        cfg["prompts"] = {"strategy_decision": DEFAULT_PROMPT}
+    if not cfg: return {"prompts": {}}
     return cfg
 
 @app.post("/config/ai")
@@ -194,10 +240,10 @@ def get_candles(pair: str, authorization: Optional[str] = Header(default=None)):
                 for c in v:
                     candles.append({
                         "time": int(c[0]), 
-                        "open": float(c[1]), 
-                        "high": float(c[2]), 
-                        "low": float(c[3]), 
-                        "close": float(c[4])
+                        "open": round(float(c[1]), 4), 
+                        "high": round(float(c[2]), 4), 
+                        "low": round(float(c[3]), 4), 
+                        "close": round(float(c[4]), 4)
                     })
                 break
         
@@ -245,7 +291,16 @@ def unkill(authorization: Optional[str] = Header(None)):
 def reset_state(authorization: Optional[str] = Header(None)):
     _require_auth(authorization)
     if os.path.exists(STATE_JSON): os.remove(STATE_JSON)
-    return {"status": "cleared"}
+    return {"status": "state_cleared"}
+
+@app.post("/control/factory_reset")
+def factory_reset(authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    for f in [STATE_JSON, PNL_JSON, TRADES_CSV, AI_LOG_PATH, BOT_STATUS_JSON]:
+        if os.path.exists(f): 
+            try: os.remove(f)
+            except: pass
+    return {"status": "factory_reset_complete"}
 
 @app.post("/control/restart")
 def restart(authorization: Optional[str] = Header(None)):
@@ -259,7 +314,7 @@ _UI_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Bot 9.3</title>
+<title>Bot 9.6</title>
 <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
 <style>
   :root { --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; --border: #334155; --primary: #3b82f6; --danger: #ef4444; --success: #10b981; --warn: #f59e0b; }
@@ -268,23 +323,18 @@ _UI_HTML = r"""<!doctype html>
   .card { background: var(--card); border: 1px solid var(--border); padding: 15px; border-radius: 8px; }
   h3 { margin-top:0; color: #94a3b8; font-size: 14px; text-transform: uppercase; }
   
-  /* Buttons */
   button { background: #334155; color: white; border: 1px solid var(--border); padding: 6px 12px; cursor: pointer; border-radius: 4px; margin-right:4px; }
   button:hover { background: #475569; }
   button.primary { background: var(--primary); border-color: var(--primary); }
   button.danger { border-color: var(--danger); color: var(--danger); background: rgba(239,68,68,0.1); }
-  button.danger:hover { background: var(--danger); color: white; }
-
-  /* Forms */
+  
   input, select, textarea { background: #020617; border: 1px solid var(--border); color: white; padding: 5px; border-radius: 4px; }
   textarea { width: 100%; height: 80px; resize: vertical; }
 
-  /* Table */
   table { width: 100%; font-size: 12px; border-collapse: collapse; margin-top: 10px; }
   th { text-align: left; color: #94a3b8; border-bottom: 1px solid var(--border); padding: 6px; }
   td { padding: 6px; border-bottom: 1px solid var(--border); }
   
-  /* Pills & Status */
   .pill { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
   .pill.ok { background: rgba(16,185,129,0.2); color: #10b981; }
   .pill.warn { background: rgba(245,158,11,0.2); color: #f59e0b; }
@@ -306,7 +356,7 @@ _UI_HTML = r"""<!doctype html>
     <button onclick="clearToken()">Clear</button>
     <button onclick="toggleToken()">Show</button>
   </div>
-  <h1 style="margin:0;">Trading Bot 9.3</h1>
+  <h1 style="margin:0;">Trading Bot 9.6</h1>
   <div style="font-size:12px; color:#64748b;">System Status: <span id="sysStatus">--</span></div>
 </div>
 
@@ -318,34 +368,34 @@ _UI_HTML = r"""<!doctype html>
         <button onclick="api('/control/resume', 'POST')">Resume</button>
         <button class="danger" onclick="api('/control/kill', 'POST', {reason:'UI'})">KILL</button>
         <button onclick="api('/control/unkill', 'POST')">Unkill</button>
-        <button onclick="api('/control/reset_state', 'POST')">Reset State</button>
+        <button class="danger" onclick="if(confirm('FACTORY RESET: Wipe ALL history?')) api('/control/factory_reset', 'POST')">Factory Reset</button>
     </div>
     
     <div class="kv-row"><span class="kv-k">Uptime</span><span class="kv-v" id="stUptime">-</span></div>
     <div class="kv-row"><span class="kv-k">Mode (Req/Eff)</span><span class="kv-v" id="stMode">-</span></div>
-    <div class="kv-row"><span class="kv-k">Latch Status</span><span class="kv-v" id="stLatch">-</span></div>
     <div class="kv-row"><span class="kv-k">Realized PnL</span><span class="kv-v" id="stPnl" style="color:#3b82f6;">-</span></div>
     <div class="kv-row"><span class="kv-k">Status</span><span class="kv-v" id="stBadges">-</span></div>
   </div>
 
   <div class="card">
-    <h3>Manual Trade</h3>
-    <div style="display:flex; gap:5px; align-items:center;">
-      <select id="mxPair"></select>
-      <select id="mxSide"><option value="buy">Buy</option><option value="sell">Sell</option></select>
-      <input id="mxAmt" value="20" style="width:50px;">
-      <button class="primary" onclick="manualEx()">Execute</button>
+    <h3 id="holdingsTitle">Current Holdings</h3>
+    <div style="margin-bottom:10px; font-size:16px;">
+       Total Value: <span id="holdingsTotal" style="color:#f1f5f9; font-weight:bold;">$0.00</span> 
+       <span style="color:#64748b; margin:0 5px;">|</span>
+       Unrealized: <span id="unrealizedTotal" style="font-weight:bold;">$0.00</span>
     </div>
-    <p style="font-size:11px; color:#64748b; margin-top:8px;">Executes immediately at Market Price.</p>
+    <table id="tblHoldings">
+      <thead><tr><th>Pair</th><th>Vol</th><th>Entry</th><th>Price</th><th>Value</th><th>Unrealized</th></tr></thead>
+      <tbody><tr><td colspan="6" style="text-align:center; color:#64748b;">Loading...</td></tr></tbody>
+    </table>
   </div>
 </div>
 
 <div class="grid" style="margin-top:20px;">
   <div class="card">
-    <h3>Equity Curve</h3>
+    <h3>Equity Curve (Realized)</h3>
     <div id="pnlChart" style="min-height:220px;"></div>
   </div>
-
   <div class="card">
     <div style="display:flex; justify-content:space-between; margin-bottom:10px;">
         <h3>Price Action</h3>
@@ -359,15 +409,10 @@ _UI_HTML = r"""<!doctype html>
   <div class="card">
     <h3>Recent Trades</h3>
     <table id="tblTrades">
-      <thead>
-        <tr>
-          <th>Time</th><th>Pair</th><th>Side</th><th>Price</th><th>Vol</th><th>Cost</th><th>Mode</th>
-        </tr>
-      </thead>
+      <thead><tr><th>Time</th><th>Pair</th><th>Side</th><th>Price</th><th>Vol</th><th>Cost</th><th>Mode</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
-
   <div class="card">
     <h3>AI Brain</h3>
     <div id="aiLogs" style="max-height: 250px; overflow-y: auto;"></div>
@@ -383,18 +428,43 @@ _UI_HTML = r"""<!doctype html>
       <button onclick="restartBot()" class="danger">Restart Bot</button>
     </div>
   </div>
+    <div class="card">
+    <h3>Manual Trade</h3>
+    <div style="display:flex; gap:5px; align-items:center;">
+      <select id="mxPair"></select>
+      <select id="mxSide"><option value="buy">Buy</option><option value="sell">Sell</option></select>
+      <input id="mxAmt" value="12" style="width:50px;">
+      <button class="primary" onclick="manualEx()">Execute</button>
+    </div>
+  </div>
 </div>
 
 <script>
 const TOKEN_KEY = "trading_admin_token";
 document.getElementById('token').value = localStorage.getItem(TOKEN_KEY) || "";
 
-// --- AUTH FUNCTIONS ---
+// --- FRIENDLY NAMES MAP ---
+const PAIR_MAP = {
+    "XXBTZUSD": "Bitcoin",
+    "XETHZUSD": "Ethereum",
+    "SOLUSD": "Solana",
+    "XRPUSD": "XRP",
+    "XXRPZUSD": "XRP",
+    "ADAUSD": "Cardano",
+    "XDGUSD": "Dogecoin",
+    "DOTUSD": "Polkadot",
+    "LINKUSD": "Chainlink"
+};
+
+function fmtPair(p) {
+    if(PAIR_MAP[p]) return `${PAIR_MAP[p]} <span style='color:#64748b; font-size:10px;'>(${p})</span>`;
+    return p;
+}
+
 function saveToken() { localStorage.setItem(TOKEN_KEY, document.getElementById('token').value.trim()); alert("Saved"); refresh(); }
 function clearToken() { localStorage.removeItem(TOKEN_KEY); document.getElementById('token').value=""; alert("Cleared"); refresh(); }
 function toggleToken() { const x=document.getElementById('token'); x.type = x.type==='password'?'text':'password'; }
 
-// --- API WRAPPER ---
 async function api(path, method="GET", body=null) {
     const headers = {"Content-Type": "application/json"};
     const t = localStorage.getItem(TOKEN_KEY);
@@ -406,16 +476,8 @@ async function api(path, method="GET", body=null) {
     } catch(e) { return null; }
 }
 
-// --- CHARTS CONFIG ---
-// Explicitly enable zoom and panning for all charts
 const commonOpts = {
-    chart: { 
-        height:220, 
-        toolbar:{show:false}, 
-        background:'transparent',
-        zoom: { enabled: true, type: 'x', autoScaleYaxis: true },
-        pan: { enabled: true, type: 'x' }
-    },
+    chart: { height:220, toolbar:{show:false}, background:'transparent', zoom:{enabled:true, type:'x'}, pan:{enabled:true} },
     theme: { mode:'dark' },
     grid: { borderColor:'#334155' },
     dataLabels: { enabled: false }
@@ -441,7 +503,6 @@ const priceChart = new ApexCharts(document.querySelector("#priceChart"), {
 });
 priceChart.render();
 
-// --- MAIN REFRESH ---
 async function refresh() {
     const h = await api('/health');
     if(!h) { document.getElementById("sysStatus").innerText="Offline"; return; }
@@ -449,39 +510,67 @@ async function refresh() {
     document.getElementById("sysStatus").innerText="Online";
     document.getElementById("authStatus").innerText = h.auth_ok ? "Auth OK" : "Auth Required";
     
-    // Status Panel
     const bs = h.bot_status || {};
     document.getElementById("stUptime").innerText = h.uptime_s + "s";
-    document.getElementById("stMode").innerText = (bs.mode_requested||"?").toUpperCase() + " / " + (bs.mode_effective||"?").toUpperCase();
+    
+    const isDry = (bs.mode_effective || "").includes("dry");
+    document.getElementById("stMode").innerText = (bs.mode_effective||"?").toUpperCase();
+    document.getElementById("holdingsTitle").innerText = isDry ? "Current Holdings (Simulated)" : "Current Holdings (Live)";
+    document.getElementById("holdingsTitle").style.color = isDry ? "#f59e0b" : "#f1f5f9";
+    
     document.getElementById("stPnl").innerText = "$" + (h.portfolio.net_pnl_usd||0).toFixed(6);
     
-    // Latch Logic
-    let latchTxt = "OK";
-    if(bs.mode_requested === 'live' && !bs.live_allowed) latchTxt = "MISSING (Blocked)";
-    document.getElementById("stLatch").innerText = latchTxt;
-
-    // Badges
     let bHtml = "";
     if(bs.killed) bHtml += '<span class="pill bad">KILLED</span> ';
     else bHtml += '<span class="pill ok">RUNNING</span> ';
     if(bs.paused) bHtml += '<span class="pill warn">PAUSED</span>';
     document.getElementById("stBadges").innerHTML = bHtml;
 
-    // PnL Chart
     const eq = await api('/equity');
     if(eq && eq.items) pnlChart.updateSeries([{data: eq.items.map(i => ({x: i.time*1000, y: i.value}))}]);
 
-    // Trades Table
+    const hold = await api('/holdings');
+    if(hold) {
+        document.getElementById("holdingsTotal").innerText = "$" + (hold.total_usd||0).toFixed(2);
+        
+        const upnl = hold.total_unrealized_usd || 0;
+        const uEl = document.getElementById("unrealizedTotal");
+        uEl.innerText = (upnl >= 0 ? "+" : "") + "$" + upnl.toFixed(4);
+        uEl.style.color = upnl >= 0 ? "#10b981" : "#ef4444";
+
+        const t = document.getElementById("tblHoldings").querySelector("tbody");
+        if(!hold.items || hold.items.length===0) {
+            t.innerHTML = `<tr><td colspan="6" style="text-align:center; color:#64748b; padding:10px;">No open positions</td></tr>`;
+        } else {
+            t.innerHTML = hold.items.map(x => {
+                const pColor = x.unrealized_usd >= 0 ? "#10b981" : "#ef4444";
+                return `
+                <tr>
+                    <td>${fmtPair(x.pair)}</td>
+                    <td>${x.volume.toFixed(6)}</td>
+                    <td>$${x.entry_price.toFixed(4)}</td>
+                    <td>$${x.current_price.toFixed(4)}</td>
+                    <td>$${x.value_usd.toFixed(2)}</td>
+                    <td style="color:${pColor}; font-weight:bold;">
+                       ${x.unrealized_usd>=0?"+":""}$${x.unrealized_usd.toFixed(4)} 
+                    </td>
+                </tr>`;
+            }).join("");
+        }
+    }
+
     const tr = await api('/trades?limit=8');
     const tbody = document.getElementById("tblTrades").querySelector("tbody");
     tbody.innerHTML = (tr.items||[]).reverse().map(x => {
-        const p = parseFloat(x.price||0).toFixed(2);
-        const v = parseFloat(x.vol||0).toFixed(6);
-        const c = parseFloat(x.cost||0).toFixed(2);
+        // --- UPDATED KEY MAPPING BASED ON CSV ---
+        const p = parseFloat(x.price||0).toFixed(4);
+        const v = parseFloat(x.volume||x.vol||0).toFixed(6); // Maps 'volume' from CSV
+        const c = parseFloat(x.notional_usd||x.cost||0).toFixed(2); // Maps 'notional_usd' from CSV
+        
         const color = x.side==='buy' ? '#10b981' : '#ef4444';
         return `<tr>
           <td>${new Date(x.ts*1000).toLocaleTimeString()}</td>
-          <td>${x.pair}</td>
+          <td>${fmtPair(x.pair)}</td>
           <td style="color:${color}; font-weight:bold;">${x.side.toUpperCase()}</td>
           <td>$${p}</td>
           <td>${v}</td>
@@ -490,7 +579,6 @@ async function refresh() {
         </tr>`;
     }).join("");
 
-    // AI Logs
     const ai = await api('/ai/logs');
     document.getElementById("aiLogs").innerHTML = (ai.items||[]).reverse().map(l => 
         `<div style="border-bottom:1px solid #334155; margin-bottom:8px; padding-bottom:4px;">
@@ -502,14 +590,13 @@ async function refresh() {
          </div>`
     ).join("");
 
-    // Populate Pair Selectors
     const c = await api('/config/summary');
     const sel = document.getElementById("mxPair");
     const chartSel = document.getElementById("chartPair");
-    
     if(sel.options.length === 0 && c.pairs) {
         c.pairs.forEach(p => {
-             const o = document.createElement("option"); o.value=p; o.text=p; 
+             const friendly = PAIR_MAP[p] ? `${PAIR_MAP[p]} (${p})` : p;
+             const o = document.createElement("option"); o.value=p; o.text=friendly; 
              sel.appendChild(o);
              chartSel.appendChild(o.cloneNode(true));
         });
@@ -517,7 +604,6 @@ async function refresh() {
     }
 }
 
-// --- ACTIONS ---
 async function loadCandles() {
     const p = document.getElementById("chartPair").value;
     if(!p) return;
@@ -555,7 +641,6 @@ async function manualEx() {
     alert("Queued");
 }
 
-// --- INIT ---
 loadConfig();
 setInterval(refresh, 2000);
 refresh();

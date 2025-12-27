@@ -1,17 +1,22 @@
 kraken:
   base_url: "https://api.kraken.com"
   pairs:
-    - "XBTUSD"
-    - "ETHUSD"
+    - "XXBTZUSD"   # Bitcoin (Keep)
+    - "XETHZUSD"   # Ethereum (Keep)
+    - "SOLUSD"     # Solana (High Volatility)
+    - "XRPUSD"     # XRP (High Liquidity)
+    - "ADAUSD"     # Cardano
+    - "XDGUSD"   # Dogecoin (Uncomment if you want higher risk)
 
 trading:
   mode: "live"          # dry_run | live
   order_type: "limit"      # limit | market
-  quote_notional_usd: 20.0
+  quote_notional_usd: 15.0
   poll_seconds: 300
 
 fees:
   taker_fee_pct: 0.26     # Standard Kraken Taker fee (0.26%)
+  operational_cost_daily_usd: 0.00 # NEW: Daily Azure/Server Cost (Deducted every 24h)
 
 safety:
   max_spread_pct: 0.30

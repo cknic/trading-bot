@@ -15,7 +15,7 @@ from exchange.kraken_client import KrakenClient
 from exchange.kraken_orders import place_or_preview, resolve_pair_info
 from exchange.kraken_marketdata import fetch_ohlc_closes
 from risk.risk_engine import RiskEngine
-from strategy.ma_crossover import decide, calculate_sma # Import calculate_sma to reuse logic
+from strategy.ma_crossover import decide, calculate_sma
 
 # --- PATHS ---
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -77,7 +77,6 @@ def ai_call(provider, model, base_prompt, market_data_str):
             headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
             
             if provider == "openrouter":
-                # url = "https://openrouter.ai/api/v1/chat/completions"
                 pass 
 
             payload = {"model": model, "messages": [{"role": "user", "content": full_prompt}]}
@@ -121,6 +120,33 @@ def update_realized_pnl(profit_usd):
         print(f">> PnL UPDATED: ${profit_usd:.6f} (Total Equity Change: ${current_net:.6f})")
     except Exception as e:
         print(f"PnL Update Error: {e}")
+
+def apply_daily_opex(kcfg):
+    daily_cost = float(kcfg.get("fees", {}).get("operational_cost_daily_usd", 0.0))
+    if daily_cost <= 0: return
+
+    try:
+        data = {}
+        if os.path.exists(PNL_PATH):
+            with open(PNL_PATH, 'r') as f: data = json.load(f)
+        
+        if "portfolio" not in data: data["portfolio"] = {"net_pnl_usd": 0.0}
+        if "equity_curve_realized" not in data: data["equity_curve_realized"] = []
+        
+        last_opex = data.get("last_opex_ts", 0)
+        now = int(time.time())
+        
+        if (now - last_opex) >= 86400:
+            current_net = data["portfolio"]["net_pnl_usd"] - daily_cost
+            data["portfolio"]["net_pnl_usd"] = current_net
+            data["equity_curve_realized"].append([now, current_net])
+            data["last_opex_ts"] = now
+            
+            with open(PNL_PATH, 'w') as f: json.dump(data, f)
+            print(f">> OPEX DEDUCTION: -${daily_cost:.2f} (Daily Operational Cost)")
+            
+    except Exception as e:
+        print(f"OpEx Update Error: {e}")
 
 def log_trade_csv(pair, side, vol, price, cost, mode):
     append_trade(int(time.time()), pair, side, str(vol), str(price), cost, mode)
@@ -175,36 +201,84 @@ def cancel_all_open_orders(k):
     except Exception as e: 
         print(f"Warn: CancelAll exception: {e}")
 
-def reconcile_positions(k, pairs):
-    print("SAFETY: Reconciling positions...")
+def reconcile_and_sync_positions(k, pairs):
+    """
+    AUTO-HEAL LOGIC:
+    1. Fetch real positions from Kraken.
+    2. Compare with state.json.
+    3. If mismatch, OVERWRITE state.json with Kraken truth.
+    """
+    print("SAFETY: Syncing State with Kraken Reality...")
     try:
         resp = k.private("OpenPositions")
-        if resp.get("error"): return f"Kraken Error: {resp['error']}"
-        
+        if resp.get("error"): 
+            print(f"Kraken Error during sync: {resp['error']}")
+            return False # Failed to sync, safe to abort
+
         kraken_pos = resp.get("result", {})
-        real_positions = defaultdict(float)
+        
+        # 1. Aggregate Kraken Data (Sum volumes per pair)
+        real_positions = defaultdict(lambda: {"vol": 0.0, "cost": 0.0})
         for txid, info in kraken_pos.items():
             p = info['pair']
             vol = float(info['vol']) - float(info['vol_closed'])
-            if vol > 0.000001: real_positions[p] += vol
+            cost = float(info['cost']) # Total cost basis
+            if vol > 0.000001: 
+                real_positions[p]["vol"] += vol
+                real_positions[p]["cost"] += cost
         
+        # 2. Load Local State
         local_state = {}
         if os.path.exists(STATE_JSON):
             with open(STATE_JSON, 'r') as f: local_state = json.load(f)
 
-        errors = []
+        # 3. Heal Mismatches
+        updates_made = False
+        
         for pair in pairs:
+            # Kraken Data
+            real_vol = real_positions[pair]["vol"]
+            real_cost = real_positions[pair]["cost"]
+            real_has = real_vol > 0.0001
+            real_avg = (real_cost / real_vol) if real_vol > 0 else 0.0
+
+            # Local Data
             local_has = local_state.get(pair, {}).get("has_position", False)
             local_vol = float(local_state.get(pair, {}).get("base_volume", 0.0))
-            real_vol = real_positions.get(pair, 0.0)
-            real_has = real_vol > 0.0001
 
-            if local_has != real_has:
-                msg = f"MISMATCH on {pair}: Local={local_has}({local_vol:.4f}), Kraken={real_has}({real_vol:.4f})"
-                print(f"CRITICAL: {msg}")
-                errors.append(msg)
-        return errors
-    except Exception as e: return f"Reconciliation Exception: {e}"
+            # Logic: If reality differs from file, TRUST REALITY
+            if abs(real_vol - local_vol) > 0.0001 or (real_has != local_has):
+                print(f">> SYNC: Mismatch on {pair}. Local: {local_vol} | Kraken: {real_vol}")
+                
+                if real_has:
+                    # Adopt the position
+                    local_state[pair] = {
+                        "has_position": True,
+                        "base_volume": real_vol,
+                        "average_price": real_avg,
+                        "last_update": int(time.time())
+                    }
+                    print(f"   -> ADOPTED: {pair} Vol: {real_vol:.6f} @ ${real_avg:.2f}")
+                else:
+                    # Clear the ghost position
+                    if pair in local_state:
+                        del local_state[pair]
+                    print(f"   -> CLEARED: {pair} (Not on Kraken)")
+                
+                updates_made = True
+
+        # 4. Save if changed
+        if updates_made:
+            with open(STATE_JSON, 'w') as f: json.dump(local_state, f, indent=2)
+            print(">> SYNC COMPLETE: Local State updated to match Kraken.")
+        else:
+            print(">> SYNC OK: Local State matches Kraken.")
+            
+        return True # Success
+
+    except Exception as e: 
+        print(f"Sync Exception: {e}")
+        return False
 
 # ==============================================================================
 # 3. MAIN LOOP
@@ -271,9 +345,6 @@ def execute_trade_logic(k, risk, kcfg, pair, side, amt=None):
         return False
 
 def generate_market_summary(k, pairs, interval, sma_short, sma_long):
-    """
-    Fetches rich data: Price, Last 5 candles, SMA values.
-    """
     summary = []
     for pair in pairs:
         try:
@@ -283,7 +354,6 @@ def generate_market_summary(k, pairs, interval, sma_short, sma_long):
             last_price = closes[-1]
             last_5 = closes[-5:]
             
-            # Calculate Indicators for Context
             val_short = calculate_sma(closes, sma_short)
             val_long = calculate_sma(closes, sma_long)
             
@@ -330,12 +400,16 @@ def main():
             print(f"Startup Warning: Could not resolve pair {p}: {e}")
 
     mode = get_trading_mode(kcfg)
+    
+    # --- STARTUP SYNC LOGIC ---
     if mode == "live":
         cancel_all_open_orders(k)
-        errs = reconcile_positions(k, pairs)
-        if errs:
-            print(f"SAFETY ABORT: {errs}")
-            write_bot_status({"killed": True, "last_error": str(errs)})
+        
+        # New logic: Sync instead of Abort
+        sync_ok = reconcile_and_sync_positions(k, pairs)
+        if not sync_ok:
+            print("CRITICAL: Failed to sync with Kraken. Aborting for safety.")
+            write_bot_status({"killed": True, "last_error": "Startup Sync Failed"})
             sys.exit(1)
 
     print("Initializing Risk Engine State...")
@@ -345,6 +419,8 @@ def main():
 
     while True:
         try:
+            apply_daily_opex(kcfg)
+
             # A. Manual
             manual = try_read_manual_order()
             if manual:
@@ -366,16 +442,24 @@ def main():
                     ai_provider, ai_model = get_ai_model_config(ai_cfg)
                 except: pass
 
-                # PASS SMA SETTINGS TO DATA GENERATOR
                 market_data = generate_market_summary(k, pairs, strategy_interval, sma_short, sma_long)
                 prompt_base = ai_cfg.get("prompts", {}).get("strategy_decision", "Analyze market.")
                 
                 ai_resp = ai_call(ai_provider, ai_model, prompt_base, market_data)
                 
-                # CLEAN LOGGING (Text Only)
                 analysis = ai_resp.get("analysis", "No Analysis")
                 print(f"AI Brain ({ai_model}): {analysis[:100]}...")
 
+                ai_entry_ban = False
+                if "VERDICT: STOP" in analysis:
+                    print(">>> AI GUARDRAIL: RISK MANAGER HAS BLOCKED NEW ENTRIES.")
+                    ai_entry_ban = True
+                elif "VERDICT: GO" in analysis:
+                    print(">>> AI GUARDRAIL: RISK MANAGER APPROVED ENTRIES.")
+                else:
+                    print(">>> AI GUARDRAIL: NO CLEAR VERDICT. DEFAULTING TO CAUTION.")
+
+                # C. Algo Logic
                 for pk in pairs:
                     try:
                         closes = fetch_ohlc_closes(k, pk, interval=strategy_interval)
@@ -390,8 +474,15 @@ def main():
                         signal, reason = decide(closes, sma_short, sma_long, has_pos)
                         print(f"{pk}: Signal={signal.upper()} | {reason}")
                         
-                        if signal in ("buy", "sell"):
-                            print(f">>> AUTO TRADING: {signal.upper()} {pk}")
+                        if signal == "buy":
+                            if ai_entry_ban:
+                                print(f">>> AUTO TRADING: BUY {pk} BLOCKED BY AI VERDICT.")
+                                continue
+                            print(f">>> AUTO TRADING: BUY {pk}")
+                            execute_trade_logic(k, risk, kcfg, pk, signal)
+                        
+                        elif signal == "sell":
+                            print(f">>> AUTO TRADING: SELL {pk}")
                             execute_trade_logic(k, risk, kcfg, pk, signal)
                             
                     except Exception as e:

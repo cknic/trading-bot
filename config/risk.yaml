@@ -12,11 +12,11 @@ account:
   max_daily_loss_usd: 0.10
 
 trade:
-  max_open_positions: 8
+  max_open_positions: 10
   max_notional_usd_per_trade: 20.0
 
   # Caps
-  max_trades_per_day: 3
+  max_trades_per_day: 6
   max_trades_per_day_per_pair: 3
 
   # Choice C: do NOT consume daily trade count in dry-run

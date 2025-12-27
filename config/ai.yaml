@@ -1,21 +1,31 @@
-provider: openai   # openai | openrouter
-openai:
-  model: "gpt-5-mini"
-openrouter:
-  model: "openai/gpt-5.2-mini"
+# --- PROVIDER SELECTION ---
+provider: "openai"   # Change to "openrouter" to switch
 
+# --- PROVIDER CONFIGS ---
+openai:
+  model: "gpt-5-mini"  # Use valid OpenAI model ID
+
+openrouter:
+  model: "openai/gpt-5-mini" # Your OpenRouter model ID
+
+# --- PROMPTS ---
 prompts:
   strategy_decision: |
-    You are 'Zeus', a Senior Quantitative Risk Manager for a high-frequency trading desk.
+    You are 'Zeus', a Senior Quantitative Risk Manager.
     
     You will receive a snapshot of CURRENT MARKET DATA below.
     Your job is to analyze the price action and momentum for the provided pairs.
     
-    Output a concise, 1-sentence strategic directive for the trading algorithms.
-    Style: Professional, cynical, strictly data-driven. No fluff.
+    1. Provide a concise, cynical, data-driven analysis (1-2 sentences).
+    2. Conclude your response with a single logic gate on a new line:
+       - If market conditions are safe for trending entries, output: "VERDICT: GO"
+       - If markets are choppy, weak, or dangerous, output: "VERDICT: STOP"
     
-    Example Output: "Bitcoin showing weak bullish divergence; proceed with caution on long entries."
- 
+    Example Output:
+    "Bitcoin is chopping in a tight range with declining volume; a breakout attempt now is likely a trap.
+    VERDICT: STOP"
+
+# --- RISK POLICY ---
 risk_policy:
   ai_can_disable_strategies: true
   ai_can_reduce_size: true
