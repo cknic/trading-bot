@@ -249,3 +249,5 @@
 {"ts": 1766775494, "event": "manual_order_queued", "pair": "XXBTZUSD", "side": "buy", "notional_usd": 20.0, "id": "manual_1766775494"}
 {"event":"manual_order_processing","id":"manual_1766775494","notional_usd":20.0,"pair":"XXBTZUSD","side":"buy","ts":1766775517}
 {"effective_notional_usd":20.0,"event":"manual_order_executed","id":"manual_1766775494","mode":"dry_run","ordertype":"limit","pair":"XXBTZUSD","price":"87197.63604","reason":"dry-run","requested_notional_usd":20.0,"side":"buy","slippage_pct":5.735250513208613e-05,"spread_pct":0.00011470501024748048,"ts":1766775517,"volume":"0.00022941"}
+{"ts": 1766792144, "event": "kill_switch_on", "reason": "pre-live test"}
+{"ts": 1766792179, "event": "kill_switch_off"}

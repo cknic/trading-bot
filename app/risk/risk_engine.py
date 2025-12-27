@@ -47,33 +47,33 @@ class RiskEngine:
             trade.get("max_trades_per_day_per_pair", self.max_trades_per_day)
         )
 
-        # Choice C behavior: by default, DO NOT count/enforce trades/day in dry-run
+        # Choice C behavior: DO NOT count/enforce trades/day in dry-run by default
         self.count_trades_in_dry_run = bool(trade.get("count_trades_in_dry_run", False))
 
-        # Circuit breakers (USD-based today, sourced from pnl.json)
+        # Circuit breakers (USD-based)
         account = cfg.get("account", {})
         self.max_daily_loss_usd = float(account.get("max_daily_loss_usd", 0.0))
         self.max_drawdown_usd = float(account.get("max_drawdown_usd", 0.0))
 
-        # Optional pct-based (only used if >0 AND equity_base_usd > 0)
+        # Optional pct-based breakers (only active if equity_base_usd > 0)
         self.max_daily_loss_pct = float(account.get("max_daily_loss_pct", 0.0))
         self.max_drawdown_pct = float(account.get("max_drawdown_pct", 0.0))
-        self.equity_base_usd = float(account.get("equity_base_usd", 0.0))  # optional
+        self.equity_base_usd = float(account.get("equity_base_usd", 0.0))
 
         # Daily counters (UTC)
         self.day_key = self._utc_day_key()
         self.trades_today = 0
         self.trades_today_by_pair: Dict[str, int] = {}
 
-        # Latest portfolio metrics (fed from pnl_analytics)
+        # Latest portfolio metrics
         self.portfolio_realized = 0.0
-        self.portfolio_max_dd = 0.0  # drawdown USD
+        self.portfolio_max_dd = 0.0
 
-        # Latest position metrics (fed from main/ledger)
+        # Latest position metrics
         self.open_positions: Optional[int] = None
         self.open_positions_ts: int = 0
 
-        # Sticky pause reason (also mirrors to pause_file)
+        # Sticky pause reason
         self.pause_reason: Optional[str] = None
 
     # -----------------
@@ -93,8 +93,8 @@ class RiskEngine:
         return (mode or "").strip().lower() == "live"
 
     def _count_trades_for_mode(self, mode: str) -> bool:
-        # Enforce/count trades/day in live always.
-        # In dry_run, only if explicitly enabled.
+        # Always count trades in live
+        # Only count in dry_run if explicitly enabled
         return self._is_live_mode(mode) or self.count_trades_in_dry_run
 
     # -----------------
@@ -120,21 +120,15 @@ class RiskEngine:
             with open(self.pause_file, "w") as f:
                 f.write(reason + "\n")
         except Exception:
-            # If we cannot write pause file, we still keep pause_reason in memory.
             pass
 
     # -----------------
     # Metrics updates
     # -----------------
     def update_portfolio_metrics(self, realized_pnl_usd: float, max_drawdown_usd: float):
-        """
-        Called from main loop after pnl_analytics runs.
-        If circuit breakers are hit, trading is paused (A behavior).
-        """
         self.portfolio_realized = float(realized_pnl_usd)
         self.portfolio_max_dd = float(max_drawdown_usd)
 
-        # USD-based breakers
         if self.max_daily_loss_usd > 0 and self.portfolio_realized <= -self.max_daily_loss_usd:
             self._touch_pause(
                 f"circuit breaker: realized pnl {self.portfolio_realized:.6f} <= -{self.max_daily_loss_usd:.6f} USD"
@@ -147,7 +141,6 @@ class RiskEngine:
             )
             return
 
-        # Optional pct-based breakers (only if equity_base_usd is provided)
         if self.equity_base_usd > 0:
             if self.max_daily_loss_pct > 0:
                 daily_loss_usd = -min(self.portfolio_realized, 0.0)
@@ -167,7 +160,6 @@ class RiskEngine:
                     return
 
     def update_open_positions(self, open_positions: int):
-        """Caller (main) should provide current open positions count."""
         self.open_positions = int(open_positions)
         self.open_positions_ts = int(time.time())
 
@@ -175,10 +167,6 @@ class RiskEngine:
     # Core gating
     # -----------------
     def can_trade(self, notional_usd: float, mode: str, pair: Optional[str] = None) -> RiskDecision:
-        """
-        Used by exchange layer before placing/previewing.
-        Conservative: if info is required and missing and fail_closed=True, block.
-        """
         self._roll_day_if_needed()
 
         if self.kill_switch_active():
@@ -187,20 +175,17 @@ class RiskEngine:
         if self.paused():
             return RiskDecision(False, f"paused: {self.get_pause_reason()}", level="block")
 
-        # A: Max open positions (hard block)
         if self.max_open_positions > 0:
             if self.open_positions is None:
                 if self.fail_closed:
                     return RiskDecision(False, "open positions unknown (fail-closed)", level="block")
-            else:
-                if self.open_positions >= self.max_open_positions:
-                    return RiskDecision(
-                        False,
-                        f"max_open_positions reached ({self.open_positions}/{self.max_open_positions})",
-                        level="block",
-                    )
+            elif self.open_positions >= self.max_open_positions:
+                return RiskDecision(
+                    False,
+                    f"max_open_positions reached ({self.open_positions}/{self.max_open_positions})",
+                    level="block",
+                )
 
-        # A: Max notional per trade (hard block)
         if notional_usd > self.max_notional_usd_per_trade:
             return RiskDecision(
                 False,
@@ -208,8 +193,6 @@ class RiskEngine:
                 level="block",
             )
 
-        # C: Trades/day cap -> block + alert (but DO NOT pause)
-        # Only enforce if live OR count_trades_in_dry_run is enabled.
         if self._count_trades_for_mode(mode):
             if self.max_trades_per_day > 0 and self.trades_today >= self.max_trades_per_day:
                 return RiskDecision(
@@ -230,10 +213,6 @@ class RiskEngine:
         return RiskDecision(True, "ok", level="block")
 
     def record_trade(self, pair: Optional[str] = None, mode: str = "dry_run"):
-        """
-        Call ONLY when a trade is considered "executed" (dry-run filled, or live placed).
-        If count_trades_in_dry_run is false, dry-run trades will not consume the daily caps.
-        """
         self._roll_day_if_needed()
 
         if not self._count_trades_for_mode(mode):

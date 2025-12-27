@@ -9,7 +9,7 @@ account:
 
   # Used now: circuit breakers based on pnl.json values (USD)
   max_drawdown_usd: 10.0
-  max_daily_loss_usd: 3.0
+  max_daily_loss_usd: 0.10
 
 trade:
   max_open_positions: 8
