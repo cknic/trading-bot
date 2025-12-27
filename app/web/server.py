@@ -2,23 +2,24 @@ import os
 import csv
 import json
 import time
-from typing import Any, Dict, List, Optional, Tuple
+import requests
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-
-# -----------------------------
-# Paths / Env
-# -----------------------------
+# ==============================================================================
+# 1. CONFIGURATION & PATHS
+# ==============================================================================
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TRADES_CSV = os.environ.get("TRADES_CSV", os.path.join(DATA_DIR, "trades.csv"))
 PNL_JSON = os.environ.get("PNL_JSON", os.path.join(DATA_DIR, "pnl.json"))
 EVENTS_JSONL = os.environ.get("EVENTS_JSONL", os.path.join(DATA_DIR, "events.jsonl"))
 STATE_JSON = os.environ.get("STATE_JSON", os.path.join(DATA_DIR, "state.json"))
 BOT_STATUS_JSON = os.environ.get("BOT_STATUS_JSON", os.path.join(DATA_DIR, "bot_status.json"))
+CACHE_DIR = os.environ.get("CACHE_DIR", os.path.join(DATA_DIR, "cache"))
 
 RUN_DIR = os.environ.get("RUN_DIR", "/run/trading")
 PAUSE_FILE = os.environ.get("PAUSE_FILE", os.path.join(RUN_DIR, "PAUSE"))
@@ -27,188 +28,85 @@ MANUAL_ORDER_PATH = os.environ.get("MANUAL_ORDER_PATH", os.path.join(RUN_DIR, "M
 
 CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
 CONFIG_KRAKEN = os.path.join(CONFIG_DIR, "kraken.yaml")
-CONFIG_RISK = os.path.join(CONFIG_DIR, "risk.yaml")
-CONFIG_AI = os.path.join(CONFIG_DIR, "ai.yaml")
-
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
-app = FastAPI(title="Trading Bot API", version="1.0")
+START_TS = int(time.time())
 
-origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+# ==============================================================================
+# 2. FASTAPI APP SETUP
+# ==============================================================================
+app = FastAPI(title="Trading Bot API", version="2.0")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in origins if o.strip()] or ["*"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-START_TS = int(time.time())
-
-
-# -----------------------------
-# Models
-# -----------------------------
+# ==============================================================================
+# 3. HELPER FUNCTIONS & MODELS
+# ==============================================================================
 class ReasonBody(BaseModel):
     reason: str = "manual"
 
-
-class PreviewBody(BaseModel):
-    pair: str
-    side: str  # buy|sell
-    notional_usd: float = 20.0
-
-
 class ManualExecuteBody(BaseModel):
     pair: str
-    side: str  # buy|sell
+    side: str
     notional_usd: float = 20.0
 
-
-# -----------------------------
-# Auth helpers
-# -----------------------------
-def _require_auth(authorization: Optional[str]) -> None:
-    if not ADMIN_TOKEN:
-        return
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid token")
-
-
 def _auth_ok(authorization: Optional[str]) -> bool:
-    if not ADMIN_TOKEN:
-        return True
-    if not authorization or not authorization.startswith("Bearer "):
-        return False
+    if not ADMIN_TOKEN: return True
+    if not authorization or not authorization.startswith("Bearer "): return False
     return authorization.split(" ", 1)[1].strip() == ADMIN_TOKEN
 
+def _require_auth(authorization: Optional[str]):
+    if not _auth_ok(authorization):
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
-# -----------------------------
-# File helpers
-# -----------------------------
-def _read_json(path: str, default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if not os.path.exists(path):
-        return default or {}
+def _read_json(path):
+    if not os.path.exists(path): return {}
+    try:
+        with open(path, "r") as f: return json.load(f)
+    except: return {}
+
+def _tail_file(path, limit=50):
+    if not os.path.exists(path): return []
+    lines = []
     try:
         with open(path, "r") as f:
-            return json.load(f)
-    except Exception:
-        return default or {}
+            if path.endswith(".csv"):
+                reader = csv.DictReader(f)
+                lines = list(reader)
+            else:
+                lines = [json.loads(line) for line in f if line.strip()]
+    except: return []
+    return lines[-limit:]
 
-
-def _read_text(path: str, max_bytes: int = 200_000) -> str:
-    if not os.path.exists(path):
-        return ""
-    with open(path, "rb") as f:
-        b = f.read(max_bytes)
-    return b.decode("utf-8", errors="replace")
-
-
-def _append_event(obj: Dict[str, Any]) -> None:
-    try:
-        os.makedirs(os.path.dirname(EVENTS_JSONL), exist_ok=True)
-        with open(EVENTS_JSONL, "a") as f:
-            f.write(json.dumps(obj) + "\n")
-    except Exception:
-        pass
-
-
-def _tail_trades(limit: int = 100) -> List[Dict[str, Any]]:
-    if not os.path.exists(TRADES_CSV):
-        return []
-    rows: List[Dict[str, Any]] = []
-    with open(TRADES_CSV, "r", newline="") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            rows.append(row)
-    limit = max(1, min(int(limit), 5000))
-    return rows[-limit:]
-
-
-def _tail_events(limit: int = 200) -> List[Dict[str, Any]]:
-    if not os.path.exists(EVENTS_JSONL):
-        return []
-    limit = max(1, min(int(limit), 5000))
-    out: List[Dict[str, Any]] = []
-    with open(EVENTS_JSONL, "rb") as f:
-        f.seek(0, os.SEEK_END)
-        size = f.tell()
-        block = 4096
-        data = b""
-        pos = size
-        while pos > 0 and data.count(b"\n") <= limit:
-            step = min(block, pos)
-            pos -= step
-            f.seek(pos)
-            data = f.read(step) + data
-        lines = data.splitlines()[-limit:]
-        for ln in lines:
-            try:
-                out.append(json.loads(ln.decode("utf-8", errors="replace")))
-            except Exception:
-                continue
-    return out
-
-
-def _touch(path: str, content: str = "") -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(content + "\n")
-
-
-def _rm(path: str) -> None:
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        return
-
-
-def _load_yaml(path: str) -> Dict[str, Any]:
+def _load_yaml(path):
     import yaml
-    txt = _read_text(path)
-    if not txt.strip():
-        return {}
-    try:
-        return yaml.safe_load(txt) or {}
-    except Exception:
-        return {}
+    if not os.path.exists(path): return {}
+    with open(path, "r") as f: return yaml.safe_load(f) or {}
 
-
-# -----------------------------
-# Bot status (IMPORTANT FIX)
-# -----------------------------
 def _read_bot_status() -> Dict[str, Any]:
-    """
-    Reads bot_status.json written by the bot (your schema):
-      mode_config, live_allowed, latch_required, latch_present, latch_file, killed, etc.
-
-    Normalizes into fields used by /health + UI:
-      mode_requested, mode_effective, allow_live, require_live_latch, live_latch_present, live_latch_file, blocked_reasons
-    """
-    bs = _read_json(BOT_STATUS_JSON, default={})
-    if not isinstance(bs, dict) or not bs:
-        return {}
-
-    mode_cfg = (bs.get("mode_config") or "").strip().lower() or "unknown"
-    live_allowed = bs.get("live_allowed")
-    latch_required = bs.get("latch_required")
-    latch_present = bs.get("latch_present")
-    latch_file = bs.get("latch_file")
+    bs = _read_json(BOT_STATUS_JSON)
+    mode_cfg = (bs.get("mode_config") or "unknown").strip().lower()
+    live_allowed = bs.get("live_allowed", True) 
+    latch_required = bs.get("latch_required", False)
+    latch_present = bs.get("latch_present", False)
+    latch_file = bs.get("latch_file", "")
     killed = bool(bs.get("killed", False))
-
+    paused = bool(bs.get("paused", False))
+    
     mode_effective = mode_cfg
-    blocked: List[str] = []
-
+    blocked = []
+    
     if mode_cfg == "live":
         if live_allowed is False:
             mode_effective = "dry_run"
-            if killed:
-                blocked.append("KILL_SWITCH present")
-            if latch_required and (not latch_present):
-                blocked.append("LIVE_LATCH missing")
+            if killed: blocked.append("KILL_SWITCH")
+            if latch_required and (not latch_present): blocked.append("LATCH_MISSING")
 
     return {
         "ts": bs.get("ts"),
@@ -219,691 +117,498 @@ def _read_bot_status() -> Dict[str, Any]:
         "live_latch_present": latch_present,
         "live_latch_file": latch_file,
         "blocked_reasons": blocked,
+        "last_error": bs.get("last_error", ""),
+        "killed": killed,
+        "paused": paused
     }
 
+# ==============================================================================
+# 4. API ENDPOINTS
+# ==============================================================================
 
-# -----------------------------
-# Core endpoints
-# -----------------------------
 @app.get("/health")
 def health(authorization: Optional[str] = Header(default=None)):
-    pnl = _read_json(PNL_JSON)
     bs = _read_bot_status()
+    pnl = _read_json(PNL_JSON)
     return {
         "ok": True,
         "uptime_s": int(time.time()) - START_TS,
-        "paused": os.path.exists(PAUSE_FILE),
-        "kill_switch": os.path.exists(KILL_FILE),
-        "pnl_ts": pnl.get("ts"),
-        "portfolio": (pnl.get("portfolio") or {}),
-        "auth_ok": _auth_ok(authorization),
+        "bot_status": bs,
+        "portfolio": pnl.get("portfolio", {}),
         "auth_required": bool(ADMIN_TOKEN),
-
-        # bot live/latch status (normalized)
-        "bot_status_ts": bs.get("ts"),
-        "mode_requested": bs.get("mode_requested"),
-        "mode_effective": bs.get("mode_effective"),
-        "allow_live": bs.get("allow_live"),
-        "require_live_latch": bs.get("require_live_latch"),
-        "live_latch_present": bs.get("live_latch_present"),
-        "live_latch_file": bs.get("live_latch_file"),
-        "blocked_reasons": bs.get("blocked_reasons") or [],
+        "auth_ok": _auth_ok(authorization)
     }
 
-
-@app.get("/pnl")
-def pnl():
-    return _read_json(PNL_JSON)
-
+@app.get("/equity")
+def equity(authorization: Optional[str] = Header(default=None)):
+    _require_auth(authorization)
+    p = _read_json(PNL_JSON)
+    # Ensure list format for frontend
+    return {"items": p.get("equity_curve_realized", [])}
 
 @app.get("/trades")
-def trades(limit: int = 100):
-    items = _tail_trades(limit)
-    return {"count": len(items), "items": items}
-
+def trades(limit: int = 50): 
+    return {"items": _tail_file(TRADES_CSV, limit)}
 
 @app.get("/events")
-def events(limit: int = 200):
-    items = _tail_events(limit)
-    return {"count": len(items), "items": items}
-
-
-@app.get("/equity")
-def equity(limit: int = 200, authorization: Optional[str] = Header(default=None)):
-    """
-    Returns realized equity curve points as:
-      {"ok": true, "count": N, "items": [[ts, realized_pnl], ...]}
-    Prefer pnl.json['equity_curve_realized'] if present.
-    """
-    _require_auth(authorization)
-
-    p = _read_json(PNL_JSON)
-    curve = p.get("equity_curve_realized") or p.get("equity_curve") or None
-    out: List[Tuple[int, float]] = []
-
-    if isinstance(curve, list):
-        for it in curve:
-            try:
-                ts = int(it[0])
-                val = float(it[1])
-                out.append((ts, val))
-            except Exception:
-                continue
-
-    out = sorted(out, key=lambda x: x[0])
-    limit = max(1, min(int(limit), 5000))
-    out = out[-limit:]
-    return {"ok": True, "count": len(out), "items": [[ts, v] for ts, v in out]}
-
+def events(limit: int = 50): 
+    return {"items": _tail_file(EVENTS_JSONL, limit)}
 
 @app.get("/config/summary")
 def config_summary():
-    kraken = _load_yaml(CONFIG_KRAKEN)
-    risk = _load_yaml(CONFIG_RISK)
-    ai = _load_yaml(CONFIG_AI)
+    k = _load_yaml(CONFIG_KRAKEN)
+    return {"pairs": k.get("kraken", {}).get("pairs", [])}
 
-    k = kraken.get("kraken", {}) or {}
-    t = kraken.get("trading", {}) or {}
-    s = kraken.get("strategy", {}) or {}
-    cd = kraken.get("cooldown", {}) or {}
-    saf = kraken.get("safety", {}) or {}
+@app.get("/candles")
+def get_candles(pair: str, authorization: Optional[str] = Header(default=None)):
+    _require_auth(authorization)
+    safe_pair = "".join(c for c in pair if c.isalnum())
+    cache_file = os.path.join(CACHE_DIR, f"{safe_pair}_ohlc.json")
+    
+    # Check cache (5 mins)
+    if os.path.exists(cache_file) and (time.time() - os.path.getmtime(cache_file) < 300):
+        return _read_json(cache_file)
 
-    acct = risk.get("account", {}) or {}
-    tr = risk.get("trade", {}) or {}
-    lev = risk.get("leverage_caps", {}) or {}
-    r_saf = risk.get("safety", {}) or {}
+    try:
+        kcfg = _load_yaml(CONFIG_KRAKEN)
+        base_url = kcfg.get("kraken", {}).get("base_url", "https://api.kraken.com")
+        url = f"{base_url}/0/public/OHLC?pair={pair}&interval=60"
+        r = requests.get(url, timeout=5)
+        data = r.json()
+        if data.get("error"): raise Exception(str(data["error"]))
+        
+        candles = []
+        for k, v in data.get("result", {}).items():
+            if k != "last" and isinstance(v, list):
+                for c in v:
+                    # Kraken: [time, open, high, low, close, vwap, vol, count]
+                    candles.append({
+                        "time": int(c[0]), 
+                        "open": float(c[1]), 
+                        "high": float(c[2]), 
+                        "low": float(c[3]), 
+                        "close": float(c[4])
+                    })
+                break
+        
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(cache_file, "w") as f: json.dump({"pair": pair, "data": candles}, f)
+        return {"pair": pair, "data": candles}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    provider = ai.get("provider", "openai")
-    model = (ai.get(provider, {}) or {}).get("model", "")
+# --- CONTROL ENDPOINTS ---
 
-    return {
-        "pairs": (k.get("pairs") or []),
-        "base_url": k.get("base_url", ""),
-        "mode": t.get("mode", ""),
-        "order_type": t.get("order_type", ""),
-        "quote_notional_usd": t.get("quote_notional_usd", ""),
-        "poll_seconds": t.get("poll_seconds", ""),
-        "timeframe_minutes": s.get("timeframe_minutes", ""),
-        "sma_short": s.get("sma_short", ""),
-        "sma_long": s.get("sma_long", ""),
-        "min_candles": s.get("min_candles", ""),
-        "cooldown_hours": cd.get("hours_after_trade", ""),
-        "safety_spread_pct": saf.get("max_spread_pct", ""),
-        "safety_slippage_pct": saf.get("max_slippage_pct", ""),
-        "limit_offset_pct": saf.get("limit_offset_pct", ""),
-        "risk_max_drawdown_pct": acct.get("max_drawdown_pct", ""),
-        "risk_max_daily_loss_pct": acct.get("max_daily_loss_pct", ""),
-        "risk_max_open_positions": tr.get("max_open_positions", ""),
-        "risk_max_notional_usd_per_trade": tr.get("max_notional_usd_per_trade", ""),
-        "risk_max_trades_per_day": tr.get("max_trades_per_day", ""),
-        "leverage_caps": lev,
-        "fail_closed": bool(r_saf.get("fail_closed", True)),
-        "ai_provider": provider,
-        "ai_model": model,
-    }
-
-
-# -----------------------------
-# Controls
-# -----------------------------
 @app.post("/control/pause")
 def pause(body: ReasonBody, authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization)
-    _touch(PAUSE_FILE, body.reason)
-    _append_event({"ts": int(time.time()), "event": "paused", "reason": body.reason})
-    return {"paused": True, "reason": body.reason}
-
+    with open(PAUSE_FILE, "w") as f: f.write(body.reason)
+    return {"status": "paused"}
 
 @app.post("/control/resume")
 def resume(authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization)
-    _rm(PAUSE_FILE)
-    _append_event({"ts": int(time.time()), "event": "resumed"})
-    return {"paused": False}
-
+    if os.path.exists(PAUSE_FILE): os.remove(PAUSE_FILE)
+    return {"status": "resumed"}
 
 @app.post("/control/kill")
 def kill(body: ReasonBody, authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization)
-    _touch(KILL_FILE, body.reason)
-    _append_event({"ts": int(time.time()), "event": "kill_switch_on", "reason": body.reason})
-    return {"kill_switch": True, "reason": body.reason}
-
+    with open(KILL_FILE, "w") as f: f.write(body.reason)
+    return {"status": "killed"}
 
 @app.post("/control/unkill")
 def unkill(authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization)
-    _rm(KILL_FILE)
-    _append_event({"ts": int(time.time()), "event": "kill_switch_off"})
-    return {"kill_switch": False}
+    if os.path.exists(KILL_FILE): os.remove(KILL_FILE)
+    return {"status": "unkilled"}
 
-
-# -----------------------------
-# Preview + Manual Execute (queue for bot)
-# -----------------------------
-def _compute_order_preview(pair: str, side: str, notional_usd: float) -> Dict[str, Any]:
-    from app.exchange.kraken_client import KrakenClient
-    from app.exchange.kraken_orders import resolve_pair_info, get_ticker
-
-    kcfg = _load_yaml(CONFIG_KRAKEN)
-    base_url = (kcfg.get("kraken", {}) or {}).get("base_url", "https://api.kraken.com")
-    k = KrakenClient(api_key="x", api_secret="x", base_url=base_url)
-
-    pair_in = pair.strip()
-    side = side.strip().lower()
-    if side not in ("buy", "sell"):
-        raise HTTPException(status_code=400, detail="side must be buy or sell")
-
-    pair_key, pair_info = resolve_pair_info(k, pair_in)
-    t = get_ticker(k, pair_key)
-    bid = float(t["b"][0])
-    ask = float(t["a"][0])
-    last = float(t["c"][0])
-    mid = (bid + ask) / 2.0 if (bid + ask) > 0 else 0.0
-    spread_pct = ((ask - bid) / mid) * 100.0 if mid > 0 else 999.0
-    slip_pct = (abs(last - mid) / mid) * 100.0 if mid > 0 else 999.0
-
-    safety = kcfg.get("safety", {}) or {}
-    max_spread = float(safety.get("max_spread_pct", 0.30))
-    max_slip = float(safety.get("max_slippage_pct", 0.50))
-    limit_off = float(safety.get("limit_offset_pct", 0.02))
-    order_type = (kcfg.get("trading", {}) or {}).get("order_type", "limit")
-
-    blocked_reasons = []
-    if spread_pct > max_spread:
-        blocked_reasons.append(f"spread {spread_pct:.6f}% > max {max_spread:.6f}%")
-    if slip_pct > max_slip:
-        blocked_reasons.append(f"slippage {slip_pct:.6f}% > max {max_slip:.6f}%")
-
-    lot_decimals = int(pair_info.get("lot_decimals", 8))
-    cost_decimals = int(pair_info.get("cost_decimals", 2))
-    notional = float(notional_usd)
-
-    vol = (notional / last) if (side == "buy" and last > 0) else 0.0
-
-    def fmt_dec(v: float, d: int) -> str:
-        return ("{:0." + str(d) + "f}").format(v)
-
-    def fmt_vol(v: float, d: int) -> str:
-        return ("{:0." + str(d) + "f}").format(v)
-
-    price = None
-    if order_type == "limit":
-        if side == "buy":
-            price = fmt_dec(ask * (1.0 + (limit_off / 100.0)), cost_decimals)
-        else:
-            price = fmt_dec(bid * (1.0 - (limit_off / 100.0)), cost_decimals)
-
-    return {
-        "pair_input": pair_in,
-        "pair_resolved": pair_key,
-        "side": side,
-        "order_type": order_type,
-        "notional_usd": notional,
-        "volume_est": fmt_vol(vol, lot_decimals),
-        "limit_price": price,
-        "market": {"bid": bid, "ask": ask, "last": last, "spread_pct": spread_pct, "slippage_pct": slip_pct},
-        "safety": {"max_spread_pct": max_spread, "max_slippage_pct": max_slip, "limit_offset_pct": limit_off},
-        "would_block": bool(blocked_reasons),
-        "block_reasons": blocked_reasons,
-        "note": "Preview compute only. No order is placed by the API.",
-    }
-
-
-@app.post("/preview/order")
-def preview_order(body: PreviewBody):
-    return _compute_order_preview(body.pair, body.side, body.notional_usd)
-
-
-# REPLACE the existing manual_execute function (approx lines 377-407) with this:
-
-# In app/web/server.py, replace the manual_execute function with this STRICTER version:
+@app.post("/control/reset_state")
+def reset_state(authorization: Optional[str] = Header(default=None)):
+    _require_auth(authorization)
+    if os.path.exists(STATE_JSON): os.remove(STATE_JSON)
+    return {"status": "cleared"}
 
 @app.post("/manual/execute")
 def manual_execute(body: ManualExecuteBody, authorization: Optional[str] = Header(default=None)):
-    """
-    Queues a one-shot request file for the bot to consume.
-    SAFETY: Hard-disabled if CONFIG is LIVE (regardless of latch status).
-    """
     _require_auth(authorization)
-
-    # SAFETY CHECK: Block if config is Live, even if currently forced to dry_run
-    bs = _read_bot_status()
-    if bs.get("mode_requested") == "live" or bs.get("mode_effective") == "live":
-        raise HTTPException(
-            status_code=403, 
-            detail="SAFETY: Manual execution is hard-disabled in LIVE configuration."
-        )
-
-    out = _compute_order_preview(body.pair, body.side, body.notional_usd)
-
     req = {
         "ts": int(time.time()),
         "id": f"manual_{int(time.time())}",
-        "pair": out.get("pair_resolved") or body.pair,
-        "side": (out.get("side") or body.side).lower(),
-        "notional_usd": float(body.notional_usd),
-        "requested_from": "ui",
+        "pair": body.pair, 
+        "side": body.side, 
+        "notional_usd": body.notional_usd
     }
-
     os.makedirs(RUN_DIR, exist_ok=True)
-    path = MANUAL_ORDER_PATH
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(req, f)
-    os.replace(tmp, path)
+    tmp = MANUAL_ORDER_PATH + ".tmp"
+    with open(tmp, "w") as f: json.dump(req, f)
+    os.replace(tmp, MANUAL_ORDER_PATH)
+    return {"queued": True}
 
-    _append_event({
-        "ts": int(time.time()),
-        "event": "manual_order_queued",
-        "pair": req["pair"],
-        "side": req["side"],
-        "notional_usd": req["notional_usd"],
-        "id": req["id"],
-    })
+# ==============================================================================
+# 5. UI ENDPOINT & HTML
+# ==============================================================================
 
-    out["queued"] = True
-    out["queue_file"] = path
-    out["manual_id"] = req["id"]
-    return out
+@app.get("/ui", response_class=HTMLResponse)
+def ui():
+    # This function uses the _UI_HTML string defined below.
+    # Python resolves this at runtime, so it's safe to define it after.
+    return HTMLResponse(content=_UI_HTML)
 
-# -----------------------------
-# UI
-# -----------------------------
+# This is the FULL HTML string. No truncation.
 _UI_HTML = r"""<!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <title>Trading Bot Dashboard</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; }
-    .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
-    .card { border:1px solid #ddd; border-radius: 10px; padding: 14px; min-width: 320px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-    h1 { margin:0 0 8px 0; }
-    h2 { margin:0 0 10px 0; font-size: 16px; }
-    button { padding:8px 10px; border-radius:8px; border:1px solid #ccc; background:white; cursor:pointer; }
-    button.primary { border-color:#111; }
-    button:disabled { opacity:0.5; cursor:not-allowed; }
-    input, select { padding:8px; border-radius:8px; border:1px solid #ccc; }
-    input { width: 520px; max-width: 100%; }
-    .muted { color:#666; font-size: 12px; }
-    .ok { color: #0a7; font-weight: 600; }
-    .bad { color: #c22; font-weight: 600; }
-    .pill { display:inline-block; padding:2px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; font-size: 12px; text-align:left; }
-    th { background:#fafafa; position: sticky; top: 0; }
-    .scroll { max-height: 260px; overflow:auto; border:1px solid #eee; border-radius:8px; }
-    .kv { display:grid; grid-template-columns: 180px 1fr; gap:6px 10px; font-size:13px; }
-    .k { color:#444; }
-    .v { font-weight:600; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
-    canvas { border:1px solid #eee; border-radius:8px; width:100%; height:140px; }
-  </style>
+    :root { --bg: #0f172a; --card: #1e293b; --text: #e2e8f0; --text-muted: #94a3b8; --border: #334155; --primary: #3b82f6; --danger: #ef4444; --success: #10b981; --warn: #f59e0b; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 20px; margin: 0; }
+    
+    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+    h1 { margin: 0 0 8px 0; font-size: 24px; }
+    .subhead { font-size: 13px; color: var(--text-muted); }
+    
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); display: flex; flex-direction: column; gap: 12px; }
+    h2 { margin: 0 0 4px 0; font-size: 14px; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; }
+    
+    .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); }
+    
+    input, select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; outline: none; font-size: 13px; }
+    input:focus, select:focus { border-color: var(--primary); }
+    
+    button { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; cursor: pointer; font-weight: 500; transition: all 0.2s; }
+    button:hover { background: #334155; }
+    button.primary { background: var(--primary); border-color: var(--primary); color: white; }
+    button.primary:hover { filter: brightness(110%); }
+    button.danger { border-color: var(--danger); color: var(--danger); }
+    button.danger:hover { background: var(--danger); color: white; }
+    
+    .time-btn { background: transparent; color: var(--text-muted); padding: 4px 8px; font-size: 11px; }
+    .time-btn:hover { color: var(--text); border-color: var(--text); }
+    .time-btn.active { background: var(--bg); color: var(--primary); border-color: var(--primary); }
+    
+    .auth-box { display: flex; align-items: center; gap: 8px; background: var(--card); padding: 8px; border-radius: 8px; border: 1px solid var(--border); }
+    
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; border: 1px solid transparent; background: #334155; color: var(--text-muted); }
+    .pill.ok { background: rgba(16, 185, 129, 0.15); color: var(--success); border-color: rgba(16, 185, 129, 0.3); }
+    .pill.bad { background: rgba(239, 68, 68, 0.15); color: var(--danger); border-color: rgba(239, 68, 68, 0.3); }
+    .pill.warn { background: rgba(245, 158, 11, 0.15); color: var(--warn); border-color: rgba(245, 158, 11, 0.3); }
+    
+    .kv-table { display: grid; grid-template-columns: 140px 1fr; gap: 6px 16px; font-size: 13px; }
+    .k { color: var(--text-muted); }
+    .v { font-family: monospace; font-weight: 600; }
+    
+    .alert { background: rgba(239,68,68,0.15); border: 1px solid var(--danger); color: #fca5a5; padding: 12px; border-radius: 8px; margin-bottom: 20px; font-weight: 600; display: none; }
+    
+    #debugLog { display:none; font-family:monospace; font-size:11px; color:#64748b; margin-top:20px; border-top:1px solid var(--border); padding-top:10px; }
+    
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: var(--text-muted); font-weight: 500; padding: 8px; border-bottom: 1px solid var(--border); }
+    td { padding: 8px; border-bottom: 1px solid var(--border); }
+    .mono { font-family: monospace; }
+    
+    /* HIDE TRADINGVIEW BRANDING */
+    a[href*="tradingview.com"] { display: none !important; opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }
+    
+    canvas { width: 100%; height: 250px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border); }
+</style>
 </head>
 <body>
-  <h1>Trading Bot Dashboard</h1>
-  <p class="muted">Tunnel-only via SSH port-forward. Controls require ADMIN_TOKEN (stored locally in this browser). Times shown in US Eastern.</p>
+
+<div class="header">
+  <div>
+    <h1>Bot Dashboard 3.4</h1>
+    <div class="subhead">
+      Status: <span id="sysStatus">Connecting...</span> | Time: <span id="sysTime" class="mono">--:--:--</span>
+    </div>
+  </div>
+  
+  <div class="auth-box">
+    <span id="authPill" class="pill">Checking Auth</span>
+    <input id="token" type="password" placeholder="Paste ADMIN_TOKEN" style="width: 140px;">
+    <button onclick="saveToken()" class="primary">Save</button>
+    <button onclick="clearToken()">Clear</button>
+    <button onclick="toggleToken()">Show</button>
+  </div>
+</div>
+
+<div id="alertBox" class="alert"></div>
+
+<div class="grid">
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2>System Health</h2>
+      <div id="healthBadges" style="display:flex; gap:6px;"></div>
+    </div>
+    
+    <div style="display:flex; gap:8px; margin-bottom: 10px;">
+      <button onclick="api('/control/pause', 'POST', {reason:'UI'})">Pause</button>
+      <button onclick="api('/control/resume', 'POST')">Resume</button>
+      <button class="danger" onclick="api('/control/kill', 'POST', {reason:'UI'})">KILL</button>
+      <button onclick="api('/control/unkill', 'POST')">Unkill</button>
+      <button onclick="resetState()">Reset State</button>
+    </div>
+
+    <div class="kv-table">
+      <div class="k">Uptime</div><div class="v" id="hUptime">-</div>
+      <div class="k">Mode (Req/Eff)</div><div class="v"><span id="hModeReq">-</span> / <span id="hModeEff">-</span></div>
+      <div class="k">Live Allowed</div><div class="v" id="hAllow">-</div>
+      <div class="k">Live Latch</div><div class="v" id="hLatch">-</div>
+      <div class="k">Blocked By</div><div class="v" id="hBlock" style="color:var(--warn)">-</div>
+      <div class="k">PnL Updated</div><div class="v" id="hPnlTs">-</div>
+    </div>
+  </div>
 
   <div class="card">
-    <h2>Admin Token</h2>
-    <div class="row" style="align-items:center;">
-      <input id="token" type="password" placeholder="Paste ADMIN_TOKEN once (stored in localStorage)" />
-      <button class="primary" onclick="saveToken()">Save</button>
-      <button onclick="clearToken()">Clear</button>
-      <button onclick="toggleToken()">Show</button>
-      <span id="authPill" class="pill muted">auth: unknown</span>
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2>Performance</h2>
+      <div id="timeBtns" style="display:flex; gap:4px;">
+        <button class="time-btn" onclick="setTimeRange('1d')">1D</button>
+        <button class="time-btn" onclick="setTimeRange('1w')">1W</button>
+        <button class="time-btn" onclick="setTimeRange('1m')">1M</button>
+        <button class="time-btn active" onclick="setTimeRange('all')">ALL</button>
+      </div>
     </div>
-    <div class="muted">Stored in this browser only: <code>localStorage.trading_admin_token</code></div>
+    <div style="font-size: 24px; font-weight: bold; font-family:monospace;" id="pNet">--</div>
+    <div id="chartContainer" style="width:100%; height:200px;"></div>
   </div>
 
-  <div class="row">
-    <div class="card" style="min-width:520px;">
-      <h2>Health</h2>
-      <div id="healthBadges" class="row"></div>
-      <div class="kv" style="margin-top:10px;">
-        <div class="k">uptime</div><div class="v" id="hUptime">—</div>
-        <div class="k">paused</div><div class="v" id="hPaused">—</div>
-        <div class="k">kill switch</div><div class="v" id="hKill">—</div>
-        <div class="k">pnl_ts</div><div class="v mono" id="hPnlTs">—</div>
-        <div class="k">mode (requested)</div><div class="v" id="hModeReq">—</div>
-        <div class="k">mode (effective)</div><div class="v" id="hModeEff">—</div>
-        <div class="k">allow_live</div><div class="v" id="hAllowLive">—</div>
-        <div class="k">live latch</div><div class="v mono" id="hLatch">—</div>
-        <div class="k">blocked reasons</div><div class="v mono" id="hBlocked">—</div>
-      </div>
-      <div class="row" style="margin-top:12px;">
-        <button id="btnPause" onclick="pause()">Pause</button>
-        <button id="btnResume" onclick="resume()">Resume</button>
-        <button id="btnKill" onclick="kill()">Kill</button>
-        <button id="btnUnkill" onclick="unkill()">Unkill</button>
-      </div>
-      <div class="muted" style="margin-top:10px;">Raw: <span class="mono" id="healthRawMini">—</span></div>
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2>Price Chart</h2>
+      <select id="chartPair" onchange="loadCandles()"></select>
     </div>
+    <div id="candleContainer" style="width:100%; height:250px;"></div>
+  </div>
 
-    <div class="card" style="min-width:560px;">
-      <h2>PnL Summary</h2>
-      <div class="kv">
-        <div class="k">net PnL</div><div class="v" id="pNet">—</div>
-        <div class="k">realized</div><div class="v" id="pRealized">—</div>
-        <div class="k">unrealized</div><div class="v" id="pUnrealized">—</div>
-        <div class="k">wins / losses</div><div class="v" id="pWL">—</div>
-        <div class="k">win rate</div><div class="v" id="pWR">—</div>
-        <div class="k">max drawdown</div><div class="v" id="pDD">—</div>
+  <div class="card">
+    <h2>Manual Trade</h2>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <select id="mxPair"></select>
+      <select id="mxSide"><option value="buy">Buy</option><option value="sell">Sell</option></select>
+      <div style="position:relative;">
+        <span style="position:absolute; left:8px; top:8px; font-size:12px; color:var(--text-muted)">$</span>
+        <input id="mxNotional" value="20" style="width:60px; padding-left:20px;">
       </div>
-
-      <h2 style="margin-top:14px;">Equity Curve (realized)</h2>
-      <canvas id="eqCanvas" width="900" height="180"></canvas>
-      <div class="scroll" style="margin-top:10px;"><table id="eqTbl"></table></div>
+      <button class="primary" onclick="manualEx()">Execute</button>
     </div>
-
-    <div class="card" style="min-width:520px;">
-      <h2>Manual Execute</h2>
-      <div class="row">
-        <select id="mxPair"></select>
-        <select id="mxSide">
-          <option value="buy">buy</option>
-          <option value="sell">sell</option>
-        </select>
-        <input id="mxNotional" value="20" style="width:120px;" />
-        <button class="primary" onclick="manualExecute()">Execute</button>
-      </div>
-      <div class="muted" style="margin-top:6px;">Queues a one-shot request for the bot to consume.</div>
-      <div class="scroll" style="max-height:220px;"><table id="mxTbl"></table></div>
-    </div>
-
-    <div class="card" style="min-width:520px;">
-      <h2>Recent Trades</h2>
-      <div class="scroll"><table id="tradesTbl"></table></div>
-    </div>
-
-    <div class="card" style="min-width:560px;">
-      <h2>Recent Events</h2>
-      <div class="scroll"><table id="eventsTbl"></table></div>
-    </div>
-
-    <div class="card" style="min-width:520px;">
-      <h2>Preview Order (compute only)</h2>
-      <div class="row">
-        <select id="pvPair"></select>
-        <select id="pvSide">
-          <option value="buy">buy</option>
-          <option value="sell">sell</option>
-        </select>
-        <input id="pvNotional" value="20" style="width:120px;" />
-        <button class="primary" onclick="preview()">Preview</button>
-      </div>
-      <div class="muted" style="margin-top:6px;">Preview never places orders.</div>
-      <div class="scroll" style="max-height:220px;"><table id="pvTbl"></table></div>
+    <div style="font-size:11px; color:var(--text-muted);">
+      Queues a one-shot order.
     </div>
   </div>
+</div>
+
+<div class="grid" style="margin-top:20px;">
+    <div class="card">
+        <h2>Recent Trades</h2>
+        <table id="tradesTbl"><tbody></tbody></table>
+    </div>
+    <div class="card">
+        <h2>System Events</h2>
+        <table id="eventsTbl"><tbody></tbody></table>
+    </div>
+</div>
+
+<div id="debugLog" style="display:none; margin-top:20px; font-family:monospace; font-size:11px; color:#64748b;"></div>
+<button onclick="document.getElementById('debugLog').style.display='block'" style="margin-top:20px; font-size:11px;">Show Debug Log</button>
 
 <script>
-const TZ = "America/New_York";
-function fmtTs(ts) {
-  const n = Number(ts||0);
-  if (!n) return "";
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: TZ,
-    year:"numeric", month:"2-digit", day:"2-digit",
-    hour:"2-digit", minute:"2-digit", second:"2-digit"
-  }).format(new Date(n*1000));
-}
-function getToken() { return localStorage.getItem("trading_admin_token") || ""; }
-function saveToken() { localStorage.setItem("trading_admin_token", document.getElementById("token").value.trim()); alert("Saved."); }
-function clearToken() { localStorage.removeItem("trading_admin_token"); document.getElementById("token").value=""; alert("Cleared."); }
-function toggleToken() {
-  const el = document.getElementById("token");
-  el.type = (el.type === "password") ? "text" : "password";
-}
-async function api(path, opts={}) {
-  const token = getToken();
-  const headers = Object.assign({"Content-Type":"application/json"}, (opts.headers||{}));
-  if (token) {
-    headers["Authorization"] = "Bearer " + token;
-  } else {
-    console.warn("Calling API without token on", path);
-  }
-  const res = await fetch(path, Object.assign({}, opts, {headers}));
-  const txt = await res.text();
-  let data;
-  try { data = JSON.parse(txt); }
-  catch(e) { data = {raw: txt}; }
-  if (!res.ok) {
-    console.error("API error", path, res.status, data);
-    throw new Error((data && data.detail) ? data.detail : ("HTTP " + res.status));
-  }
-  return data;
-}
-function money(x) {
-  const n = Number(x || 0);
-  const sign = n >= 0 ? "" : "-";
-  return sign + "$" + Math.abs(n).toFixed(2);
-}
-function pct(x) { return (Number(x||0)).toFixed(2) + "%"; }
+// --- CHART SETUP ---
+const chartOpts = {
+  layout: { background: { color: '#1e293b' }, textColor: '#cbd5e1' },
+  grid: { vertLines: { color: '#334155' }, horzLines: { color: '#334155' } },
+  timeScale: { borderColor: '#475569', timeVisible: true },
+  rightPriceScale: { borderColor: '#475569' },
+  localization: { priceFormatter: p => '$' + p.toFixed(2) }
+};
+let pnlSeries, pnlChart, candleSeries, candleChart;
 
-function setAuthUI(authRequired, authOk) {
-  const pill = document.getElementById("authPill");
-  pill.className = "pill " + (authOk ? "ok" : "bad");
-  pill.textContent = `auth: ${authRequired ? "required" : "not required"} · ${authOk ? "OK" : "FAIL"}`;
-  const enableControls = (!authRequired) || authOk;
-  ["btnPause","btnResume","btnKill","btnUnkill"].forEach(id => document.getElementById(id).disabled = !enableControls);
+try {
+  pnlChart = LightweightCharts.createChart(document.getElementById('chartContainer'), chartOpts);
+  pnlSeries = pnlChart.addAreaSeries({ lineColor: '#3b82f6', topColor: 'rgba(59, 130, 246, 0.4)', bottomColor: 'rgba(59, 130, 246, 0)' });
+  
+  candleChart = LightweightCharts.createChart(document.getElementById('candleContainer'), chartOpts);
+  candleSeries = candleChart.addCandlestickSeries();
+} catch(e) { console.error("Chart init failed", e); }
+
+const TOKEN_KEY = "trading_admin_token";
+let timeRange = 'all';
+
+function log(msg) {
+    const d = document.getElementById('debugLog');
+    d.innerText = `[${new Date().toLocaleTimeString()}] ${msg}\n` + d.innerText.substring(0, 1000);
 }
 
-function renderBadges(h) {
-  const el = document.getElementById("healthBadges");
-  const ok = (h.ok && !h.kill_switch);
-  const latchTxt = h.require_live_latch ? (h.live_latch_present ? "latch=present" : "latch=missing") : "latch=not-required";
-  const latchCls = h.require_live_latch ? (h.live_latch_present ? "ok" : "bad") : "ok";
-  const allowTxt = (h.allow_live === true) ? "allow_live=true" : "allow_live=false";
-  const allowCls = (h.allow_live === true) ? "ok" : "bad";
-  const modeReq = h.mode_requested || "unknown";
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ""; }
+function saveToken() { localStorage.setItem(TOKEN_KEY, document.getElementById("token").value.trim()); alert("Saved"); refresh(); }
+function clearToken() { localStorage.removeItem(TOKEN_KEY); document.getElementById("token").value=""; alert("Cleared"); refresh(); }
+function toggleToken() { const el=document.getElementById("token"); el.type = el.type==="password"?"text":"password"; }
 
-  el.innerHTML = `
-    <span class="pill ${ok ? "ok":"bad"}">${ok ? "OK":"NOT OK"}</span>
-    <span class="pill ${h.paused ? "bad":"ok"}">paused=${h.paused}</span>
-    <span class="pill ${h.kill_switch ? "bad":"ok"}">kill=${h.kill_switch}</span>
-    <span class="pill ${(modeReq==="live") ? "bad" : "ok"}">mode=${modeReq}</span>
-    <span class="pill ${allowCls}">${allowTxt}</span>
-    <span class="pill ${latchCls}">${latchTxt}</span>
-  `;
-}
-
-function renderTrades(items) {
-  const tbl = document.getElementById("tradesTbl");
-  const head = `<tr><th>time (ET)</th><th>pair</th><th>side</th><th>price</th><th>notional</th><th>mode</th></tr>`;
-  const rows = (items||[]).slice().reverse().map(t => (
-    `<tr>
-      <td class="mono">${fmtTs(t.ts||0)}</td>
-      <td>${t.pair||""}</td>
-      <td>${t.side||""}</td>
-      <td class="mono">${t.price||""}</td>
-      <td class="mono">${t.notional_usd||""}</td>
-      <td>${t.mode||""}</td>
-    </tr>`
-  )).join("");
-  tbl.innerHTML = head + rows;
-}
-
-function renderEvents(items) {
-  const tbl = document.getElementById("eventsTbl");
-  const head = `<tr><th>time (ET)</th><th>event</th><th>pair</th><th>action</th><th>reason</th></tr>`;
-  const rows = (items||[]).slice().reverse().map(e => (
-    `<tr>
-      <td class="mono">${fmtTs(e.ts||0)}</td>
-      <td>${e.event||""}</td>
-      <td>${e.pair||""}</td>
-      <td>${e.action||e.side||""}</td>
-      <td>${e.reason||""}</td>
-    </tr>`
-  )).join("");
-  tbl.innerHTML = head + rows;
-}
-
-function renderEqTable(curve) {
-  const tbl = document.getElementById("eqTbl");
-  const head = `<tr><th>time (ET)</th><th>realized_pnl</th></tr>`;
-  const rows = (curve||[]).slice().reverse().map(pt => (
-    `<tr><td class="mono">${fmtTs(pt[0])}</td><td class="mono">${money(pt[1])}</td></tr>`
-  )).join("");
-  tbl.innerHTML = head + rows;
-}
-
-function drawEquity(curve) {
-  const c = document.getElementById("eqCanvas");
-  const ctx = c.getContext("2d");
-  ctx.clearRect(0,0,c.width,c.height);
-
-  const pts = (curve||[]).map(p => [Number(p[0]||0), Number(p[1]||0)]).filter(p => p[0]>0);
-  if (pts.length < 2) { ctx.fillText("Not enough data yet", 10, 20); return; }
-
-  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
-  const xmin = Math.min(...xs), xmax = Math.max(...xs);
-  const ymin = Math.min(...ys), ymax = Math.max(...ys);
-
-  const pad = 18, W = c.width, H = c.height;
-  const xscale = (x) => pad + ((x - xmin) / (xmax - xmin)) * (W - pad*2);
-  const yscale = (y) => {
-    const denom = (ymax - ymin) || 1;
-    return H - pad - ((y - ymin) / denom) * (H - pad*2);
-  };
-
-  ctx.beginPath();
-  ctx.moveTo(pad, H-pad); ctx.lineTo(W-pad, H-pad);
-  ctx.strokeStyle = "#ddd"; ctx.stroke();
-
-  if (ymin <= 0 && ymax >= 0) {
-    const y0 = yscale(0);
-    ctx.beginPath(); ctx.moveTo(pad, y0); ctx.lineTo(W-pad, y0);
-    ctx.strokeStyle = "#eee"; ctx.stroke();
-  }
-
-  ctx.beginPath();
-  pts.forEach((p,i)=>{ const x=xscale(p[0]), y=yscale(p[1]); if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y); });
-  ctx.strokeStyle = "#111"; ctx.lineWidth = 2; ctx.stroke();
-
-  const last = pts[pts.length-1][1];
-  ctx.fillStyle = "#111";
-  ctx.font = "12px ui-monospace, Menlo, monospace";
-  ctx.fillText(`last: ${money(last)}`, pad, pad);
-}
-
-function renderPreview(out, tableId) {
-  const tbl = document.getElementById(tableId);
-  const rows = [
-    ["pair", out.pair_resolved],
-    ["side", out.side],
-    ["order_type", out.order_type],
-    ["notional_usd", money(out.notional_usd)],
-    ["volume_est", out.volume_est],
-    ["limit_price", out.limit_price || ""],
-    ["bid/ask/last", `${out.market.bid} / ${out.market.ask} / ${out.market.last}`],
-    ["spread%", out.market.spread_pct.toFixed(6)],
-    ["slippage%", out.market.slippage_pct.toFixed(6)],
-    ["would_block", String(out.would_block)],
-    ["block_reasons", (out.block_reasons||[]).join("; ")],
-    ["queued", String(out.queued||false)],
-    ["manual_id", out.manual_id || ""],
-  ];
-  tbl.innerHTML = `<tr><th>field</th><th>value</th></tr>` + rows.map(r => `<tr><td>${r[0]}</td><td class="mono">${r[1]}</td></tr>`).join("");
-}
-
-async function refresh() {
-  const h = await api("/health", {method:"GET", headers:{}});
-  setAuthUI(h.auth_required, h.auth_ok);
-  renderBadges(h);
-
-  document.getElementById("hUptime").textContent = `${h.uptime_s}s`;
-  document.getElementById("hPaused").textContent = String(h.paused);
-  document.getElementById("hKill").textContent = String(h.kill_switch);
-  document.getElementById("hPnlTs").textContent = fmtTs(h.pnl_ts || 0);
-
-  document.getElementById("hModeReq").textContent = String(h.mode_requested || "unknown");
-  document.getElementById("hModeEff").textContent = String(h.mode_effective || "unknown");
-  document.getElementById("hAllowLive").textContent = String(h.allow_live);
-  const latchLine = `required=${!!h.require_live_latch} present=${!!h.live_latch_present} file=${h.live_latch_file||""}`;
-  document.getElementById("hLatch").textContent = latchLine;
-  document.getElementById("hBlocked").textContent = (h.blocked_reasons||[]).join("; ") || "";
-
-  document.getElementById("healthRawMini").textContent =
-    `ok=${h.ok} paused=${h.paused} kill=${h.kill_switch} mode=${h.mode_requested||"?"} allow_live=${h.allow_live}`;
-
-  const p = await api("/pnl");
-  const port = p.portfolio || {};
-  document.getElementById("pNet").textContent = money(port.net_pnl_usd);
-  document.getElementById("pRealized").textContent = money(port.realized_pnl_usd);
-  document.getElementById("pUnrealized").textContent = money(port.unrealized_pnl_usd);
-  document.getElementById("pWL").textContent = `${port.wins||0} / ${port.losses||0}`;
-  document.getElementById("pWR").textContent = pct((port.win_rate||0) * 100);
-  document.getElementById("pDD").textContent = money(port.max_drawdown_usd);
-
-  const eq = await api("/equity?limit=200", {method:"GET"});
-  const curve = eq.items || [];
-  drawEquity(curve);
-  renderEqTable(curve);
-
-  const cs = await api("/config/summary");
-  const pairs = (cs.pairs||["XBTUSD","ETHUSD"]);
-  ["pvPair","mxPair"].forEach(id => {
-    const sel = document.getElementById(id);
-    if (sel.options.length === 0) {
-      pairs.forEach(p => { const o=document.createElement("option"); o.value=p; o.textContent=p; sel.appendChild(o); });
-    }
-  });
-
-  const t = await api("/trades?limit=50");
-  renderTrades(t.items||[]);
-  const ev = await api("/events?limit=120");
-  renderEvents(ev.items||[]);
-}
-
-async function pause() {
-  const reason = prompt("Pause reason:", "manual pause") || "manual pause";
-  await api("/control/pause", {method:"POST", body: JSON.stringify({reason})});
-  await refresh();
-}
-async function resume() { await api("/control/resume", {method:"POST"}); await refresh(); }
-async function kill() {
-  const reason = prompt("Kill reason:", "manual kill") || "manual kill";
-  await api("/control/kill", {method:"POST", body: JSON.stringify({reason})});
-  await refresh();
-}
-async function unkill() { await api("/control/unkill", {method:"POST"}); await refresh(); }
-
-async function preview() {
-  const pair = document.getElementById("pvPair").value;
-  const side = document.getElementById("pvSide").value;
-  const notional_usd = parseFloat(document.getElementById("pvNotional").value || "20");
-  try {
-    const out = await api("/preview/order", {method:"POST", body: JSON.stringify({pair, side, notional_usd})});
-    renderPreview(out, "pvTbl");
-  } catch(e) {
-    document.getElementById("pvTbl").innerHTML = `<tr><th>Error</th></tr><tr><td class="mono">${e.message}</td></tr>`;
-  }
-}
-
-async function manualExecute() {
-  const pair = document.getElementById("mxPair").value;
-  const side = document.getElementById("mxSide").value;
-  const notional_usd = parseFloat(document.getElementById("mxNotional").value || "20");
-  try {
-    const out = await api("/manual/execute", {method:"POST", body: JSON.stringify({pair, side, notional_usd})});
-    renderPreview(out, "mxTbl");
-    await refresh();
-  } catch(e) {
-    document.getElementById("mxTbl").innerHTML = `<tr><th>Error</th></tr><tr><td class="mono">${e.message}</td></tr>`;
-  }
+function setTimeRange(r) {
+    timeRange = r;
+    document.querySelectorAll('.time-btn').forEach(b => b.className = 'time-btn' + (b.innerText.toLowerCase()===r ? ' active' : ''));
+    refresh();
 }
 
 document.getElementById("token").value = getToken();
+
+async function api(path, method='GET', body=null) {
+  const headers = { "Content-Type": "application/json" };
+  const token = getToken();
+  if(token) headers["Authorization"] = "Bearer " + token;
+  const opts = { method, headers };
+  if(body) opts.body = JSON.stringify(body);
+  
+  try {
+      const res = await fetch(path, opts);
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.detail || "Error " + res.status);
+      return data;
+  } catch(e) {
+      log("API Error: " + path + " -> " + e.message);
+      throw e;
+  }
+}
+
+function renderBadges(h) {
+  const bs = h.bot_status || {};
+  const ok = (h.ok && !bs.killed);
+  const badges = [
+    `<span class="pill ${ok ? "ok":"bad"}">${ok ? "OK" : "ISSUE"}</span>`,
+    `<span class="pill ${bs.paused ? "warn":"ok"}">${bs.paused ? "PAUSED" : "RUNNING"}</span>`,
+    `<span class="pill ${bs.killed ? "bad":"ok"}">KILL=${bs.killed}</span>`
+  ];
+  document.getElementById("healthBadges").innerHTML = badges.join("");
+}
+
+async function refresh() {
+  try {
+    const h = await api('/health');
+    const bs = h.bot_status || {};
+    
+    document.getElementById("sysStatus").textContent = "Online";
+    document.getElementById("sysStatus").style.color = "var(--success)";
+    document.getElementById("sysTime").textContent = new Date().toLocaleTimeString();
+    
+    const ap = document.getElementById("authPill");
+    ap.textContent = h.auth_required ? (h.auth_ok ? "Auth: OK" : "Auth: Missing") : "No Auth";
+    ap.className = "pill " + (h.auth_ok ? "ok" : "warn");
+
+    const box = document.getElementById('alertBox');
+    if(bs.last_error) { box.style.display='block'; box.textContent = "CRITICAL: " + bs.last_error; }
+    else { box.style.display='none'; }
+
+    renderBadges(h);
+    document.getElementById('hUptime').textContent = h.uptime_s + "s";
+    document.getElementById('hModeReq').textContent = bs.mode_requested || "-";
+    document.getElementById('hModeEff').textContent = bs.mode_effective || "-";
+    document.getElementById('hAllow').textContent = String(bs.allow_live);
+    document.getElementById('hLatch').textContent = bs.require_live_latch ? (bs.live_latch_present ? "Present" : "Missing") : "Not Req";
+    document.getElementById('hBlock').textContent = (bs.blocked_reasons||[]).join(", ") || "-";
+    document.getElementById('hPnlTs').textContent = new Date().toLocaleTimeString();
+
+    document.getElementById('pNet').textContent = "$" + (h.portfolio.net_pnl_usd||0).toFixed(2);
+
+    // --- PNL CHART FIX: Force flat line if empty ---
+    if(pnlSeries) {
+        const eq = await api('/equity');
+        let items = eq.items || [];
+        
+        let chartData = items.map(i => {
+            if(Array.isArray(i)) return { time: i[0], value: i[1] };
+            return i;
+        });
+
+        // FORCE DATA IF EMPTY OR SINGLE POINT
+        if (chartData.length < 2) {
+            const now = Math.floor(Date.now()/1000);
+            const val = chartData.length > 0 ? chartData[0].value : 0;
+            chartData = [
+                { time: now - 86400, value: val },
+                { time: now, value: val }
+            ];
+        }
+
+        const now = Math.floor(Date.now()/1000);
+        let start = 0;
+        if(timeRange === '1d') start = now - 86400;
+        if(timeRange === '1w') start = now - 604800;
+        if(timeRange === '1m') start = now - 2592000;
+        
+        const filtered = chartData.filter(i => i.time >= start);
+        
+        // Use filtered data if enough points, else fallback to full synthetic
+        if (filtered.length >= 2) {
+             pnlSeries.setData(filtered);
+        } else {
+             pnlSeries.setData(chartData);
+        }
+        pnlChart.timeScale().fitContent();
+    }
+
+    const tr = await api('/trades?limit=10');
+    document.getElementById('tradesTbl').querySelector('tbody').innerHTML = tr.items.reverse().map(t => 
+      `<tr><td>${new Date(t.ts*1000).toLocaleTimeString()}</td><td>${t.pair}</td><td>${t.side}</td><td>${t.price}</td><td>$${t.notional_usd}</td><td>${t.mode||'-'}</td></tr>`
+    ).join('');
+
+    const ev = await api('/events?limit=10');
+    document.getElementById('eventsTbl').querySelector('tbody').innerHTML = ev.items.reverse().map(e => 
+      `<tr><td>${new Date(e.ts*1000).toLocaleTimeString()}</td><td>${e.event}</td><td>${e.pair||'-'}</td><td>${e.reason||e.action||''}</td></tr>`
+    ).join('');
+
+    const c = await api('/config/summary');
+    const pairs = c.pairs || [];
+    ['mxPair','chartPair'].forEach(id => {
+       const el = document.getElementById(id);
+       if(el.options.length === 0) {
+         pairs.forEach(p => {
+           const o = document.createElement('option'); o.value=p; o.text=p; el.appendChild(o);
+         });
+         if(id === 'chartPair') loadCandles(); 
+       }
+    });
+
+  } catch(e) {
+    document.getElementById("sysStatus").textContent = "Offline";
+    document.getElementById("sysStatus").style.color = "var(--danger)";
+    console.log("Poll error", e);
+  }
+}
+
+async function loadCandles() {
+  const pair = document.getElementById('chartPair').value;
+  if(!pair) return;
+  try {
+    const data = await api(`/candles?pair=${pair}`);
+    if(candleSeries && data.data && data.data.length > 0) {
+        candleSeries.setData(data.data);
+        candleChart.timeScale().fitContent();
+    }
+  } catch(e) { log("Candle error: " + e.message); }
+}
+
+async function resetState() {
+  if(confirm("Delete state.json? Use this to fix mismatch errors.")) {
+    await api('/control/reset_state', 'POST');
+    alert("State cleared. Restart the bot.");
+  }
+}
+
+async function manualEx() {
+  const body = {
+    pair: document.getElementById('mxPair').value,
+    side: document.getElementById('mxSide').value,
+    notional_usd: parseFloat(document.getElementById('mxNotional').value)
+  };
+  try { await api('/manual/execute', 'POST', body); alert("Order Queued"); }
+  catch(e) { alert(e.message); }
+}
+
+setInterval(refresh, 2000);
 refresh();
-setInterval(refresh, 3000);
 </script>
 </body>
 </html>
 """
-
-@app.get("/ui", response_class=HTMLResponse)
-def ui():
-    return HTMLResponse(content=_UI_HTML)
