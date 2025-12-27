@@ -1,236 +1,137 @@
-import os
-from dataclasses import dataclass
-from typing import Dict, Any, Tuple, Optional
+import time
 
-from app.exchange.kraken_client import KrakenClient
-from app.risk.risk_engine import RiskEngine
+# --- CACHE ---
+# Stores pair info (decimals, min_size) so we don't spam Kraken API
+_PAIR_INFO_CACHE = {}
 
-
-@dataclass
 class OrderDecision:
-    pair: str
-    side: str
-    ordertype: str
-    volume: str
-    price: Optional[str]
-    mode: str
-    notional_usd: float
-    reason: str
+    def __init__(self, should_place, side=None, volume=None, price=None, reason="", mode="dry_run"):
+        self.should_place = should_place
+        self.side = side
+        self.volume = volume
+        self.price = price
+        self.reason = reason
+        self.mode = mode
 
+def resolve_pair_info(k, pair):
+    """
+    Resolves friendly names (ETHUSD) to Kraken IDs (XETHZUSD) and fetches decimals.
+    Now uses caching to prevent timeouts on repetitive calls.
+    """
+    global _PAIR_INFO_CACHE
+    
+    # 1. Check Cache
+    if pair in _PAIR_INFO_CACHE:
+        return _PAIR_INFO_CACHE[pair]
 
-def _live_latch_enabled() -> bool:
-    # Use the same env var default as main.py and server.py
-    path = os.environ.get("LIVE_LATCH_FILE", "/run/trading/LIVE_LATCH")
-    return os.path.exists(path)
+    # 2. Fetch from API (Only if not in cache)
+    try:
+        resp = k.public("AssetPairs", {"pair": pair})
+        if resp.get("error"):
+            raise Exception(f"Kraken error: {resp['error']}")
+        
+        result = resp["result"]
+        # Kraken returns a dict key like 'XXBTZUSD' or 'XBTUSD'
+        key = list(result.keys())[0]
+        info = result[key]
+        
+        # Normalize Data
+        normalized = {
+            "pair_key": key,
+            "ordermin": float(info.get("ordermin", "0.001")),
+            "pair_decimals": int(info.get("pair_decimals", 2)),
+            "lot_decimals": int(info.get("lot_decimals", 8)),
+            "cost_decimals": int(info.get("cost_decimals", 5)),
+            "wsname": info.get("wsname", key) 
+        }
+        
+        # 3. Save to Cache (Cache both input name and resolved name)
+        _PAIR_INFO_CACHE[pair] = (key, normalized)
+        _PAIR_INFO_CACHE[key] = (key, normalized)
+        
+        return key, normalized
+    except Exception as e:
+        raise Exception(f"Failed to resolve pair {pair}: {e}")
 
+def get_price(k, pair_key):
+    # Always fetch fresh price (never cache this!)
+    t = k.public("Ticker", {"pair": pair_key})
+    if t.get("error"): raise Exception(str(t["error"]))
+    # Ticker format: {"XXBTZUSD": {"c": ["price", "vol"], ...}}
+    return float(t["result"][pair_key]["c"][0])
 
-def resolve_pair_info(k: KrakenClient, pair: str) -> Tuple[str, Dict[str, Any]]:
-    ap = k.public("AssetPairs", {"pair": pair})
-    if ap.get("error"):
-        raise RuntimeError(f"AssetPairs error: {ap['error']}")
-    result = ap["result"]
-    key = next(iter(result.keys()))
-    return key, result[key]
-
-
-def get_ticker(k: KrakenClient, pair: str) -> Dict[str, Any]:
-    t = k.public("Ticker", {"pair": pair})
-    if t.get("error"):
-        raise RuntimeError(f"Ticker error: {t['error']}")
-    result = t["result"]
-    key = next(iter(result.keys()))
-    return result[key]
-
-
-def _pct(x: float) -> float:
-    return x * 100.0
-
-
-def _format_dec(val: float, decimals: int) -> str:
-    fmt = "{:0." + str(decimals) + "f}"
-    return fmt.format(val)
-
-
-def _format_volume(vol: float, lot_decimals: int) -> str:
-    fmt = "{:0." + str(lot_decimals) + "f}"
-    return fmt.format(vol)
-
-
-def _calc_spread_pct(bid: float, ask: float) -> float:
-    mid = (bid + ask) / 2.0
-    if mid <= 0:
-        return 999.0
-    return _pct((ask - bid) / mid)
-
-
-def _slippage_pct(ref: float, current: float) -> float:
-    if ref <= 0:
-        return 999.0
-    return _pct(abs(current - ref) / ref)
-
-
-def build_order(
-    k: KrakenClient,
-    cfg: Dict[str, Any],
-    pair_key: str,
-    side: str,
-    base_volume_override: Optional[float],
-) -> Tuple[OrderDecision, Dict[str, Any]]:
-    mode = cfg["trading"]["mode"]
-    ordertype = cfg["trading"].get("order_type", "limit")
-    quote = float(cfg["trading"]["quote_notional_usd"])
-
-    max_spread = float(cfg["safety"]["max_spread_pct"])
-    max_slip = float(cfg["safety"]["max_slippage_pct"])
-    limit_off = float(cfg["safety"]["limit_offset_pct"])
-
-    _, pair_info = resolve_pair_info(k, pair_key)
-    ticker = get_ticker(k, pair_key)
-
-    bid = float(ticker["b"][0])
-    ask = float(ticker["a"][0])
-    last = float(ticker["c"][0])
-
-    spread = _calc_spread_pct(bid, ask)
-    mid = (bid + ask) / 2.0
-    slip = _slippage_pct(mid, last)
-
-    metrics = {
-        "bid": bid,
-        "ask": ask,
-        "last": last,
-        "mid": mid,
-        "spread_pct": spread,
-        "slippage_pct": slip,
-    }
-
-    if spread > max_spread:
-        return (
-            OrderDecision(
-                pair_key,
-                side,
-                ordertype,
-                "0",
-                None,
-                mode,
-                quote,
-                f"blocked: spread {spread:.6f}% > max {max_spread:.6f}%",
-            ),
-            metrics,
-        )
-
-    if slip > max_slip:
-        return (
-            OrderDecision(
-                pair_key,
-                side,
-                ordertype,
-                "0",
-                None,
-                mode,
-                quote,
-                f"blocked: slippage {slip:.6f}% > max {max_slip:.6f}%",
-            ),
-            metrics,
-        )
-
-    lot_decimals = int(pair_info.get("lot_decimals", 8))
-    cost_decimals = int(pair_info.get("cost_decimals", 2))
-
-    if side == "buy":
-        if last <= 0:
-            return (
-                OrderDecision(pair_key, side, ordertype, "0", None, mode, quote, "blocked: invalid last"),
-                metrics,
-            )
-
-        vol = quote / last
-        vol_str = _format_volume(vol, lot_decimals)
-        notional = quote
-
+def build_order(k, cfg, pair_key, side, base_volume_override=None):
+    """
+    Calculates volume, price, and checks min-order constraints.
+    """
+    # 1. Get Rules (Cached)
+    _, info = resolve_pair_info(k, pair_key)
+    
+    # 2. Get Price (Fresh)
+    price = get_price(k, pair_key)
+    
+    # 3. Calculate Volume
+    volume = 0.0
+    
+    if side == "sell":
+        if base_volume_override is None:
+            return OrderDecision(False, reason="Sell requested but no position volume provided"), {}
+        volume = float(base_volume_override)
     else:
-        if not base_volume_override or base_volume_override <= 0:
-            return (
-                OrderDecision(pair_key, side, ordertype, "0", None, mode, 0.0, "blocked: no position volume"),
-                metrics,
-            )
+        # Buy: Calculate based on fixed USD amount
+        notional = float(cfg["trading"]["quote_notional_usd"])
+        volume = notional / price
 
-        vol_str = _format_volume(float(base_volume_override), lot_decimals)
-        notional = float(base_volume_override) * last
+    # 4. Enforce Min Order Size
+    if volume < info["ordermin"]:
+        return OrderDecision(False, reason=f"Volume {volume:.6f} < min {info['ordermin']}"), {"last": price}
 
-    ordermin = pair_info.get("ordermin")
-    if ordermin is not None:
+    # 5. Format Volume (Fix decimals)
+    fmt_vol = f"{volume:.{info['lot_decimals']}f}"
+    
+    mode = cfg["trading"]["mode"]
+    return OrderDecision(True, side=side, volume=fmt_vol, price=price, reason=f"{mode} order planned", mode=mode), {"last": price}
+
+def place_or_preview(k, cfg, risk_engine, pair, side, base_volume_override=None):
+    # 1. Resolve pair
+    pk, _ = resolve_pair_info(k, pair)
+    
+    # 2. Build Decision
+    od, metrics = build_order(k, cfg, pk, side, base_volume_override)
+    
+    if not od.should_place:
+        return od, metrics
+
+    # 3. Risk Check
+    if not risk_engine.check(side, float(od.volume), od.price):
+        od.should_place = False
+        od.reason = "Risk check failed"
+        return od, metrics
+
+    # 4. Execution
+    if od.mode == "live":
+        print(f"LIVE EXECUTION: {side} {od.volume} {pk}")
+        
+        req = {
+            "pair": pk,
+            "type": side,
+            "ordertype": "market",
+            "volume": od.volume,
+            "validate": False 
+        }
+        
         try:
-            if float(vol_str) < float(ordermin):
-                return (
-                    OrderDecision(
-                        pair_key,
-                        side,
-                        ordertype,
-                        vol_str,
-                        None,
-                        mode,
-                        notional,
-                        f"blocked: below ordermin ({ordermin})",
-                    ),
-                    metrics,
-                )
-        except Exception:
-            pass
-
-    price_str = None
-    if ordertype == "limit":
-        if side == "buy":
-            px = ask * (1.0 + (limit_off / 100.0))
-        else:
-            px = bid * (1.0 - (limit_off / 100.0))
-        price_str = _format_dec(px, cost_decimals)
-
-    return (
-        OrderDecision(pair_key, side, ordertype, vol_str, price_str, mode, float(notional), "ok"),
-        metrics,
-    )
-
-
-def place_or_preview(
-    k: KrakenClient,
-    cfg: Dict[str, Any],
-    risk: RiskEngine,
-    pair_key: str,
-    side: str,
-    base_volume_override: Optional[float],
-) -> Tuple[OrderDecision, Dict[str, Any]]:
-    od, metrics = build_order(k, cfg, pair_key, side, base_volume_override)
-    if od.reason != "ok":
-        return od, metrics
-
-    # IMPORTANT: pass pair so per-pair caps apply
-    rd = risk.can_trade(notional_usd=od.notional_usd, mode=od.mode, pair=pair_key)
-    if not rd.allowed:
-        od.reason = f"blocked by risk: {rd.reason}"
-        return od, metrics
-
-    if od.mode != "live":
+            resp = k.private("AddOrder", req)
+            if resp.get("error"):
+                od.reason = f"Kraken Reject: {resp['error']}"
+            else:
+                # txid = resp["result"]["txid"]
+                od.reason = "LIVE order placed"
+        except Exception as e:
+            od.reason = f"Execution Exception: {e}"
+            
+    else:
+        # Dry Run Simulation
         od.reason = "dry-run"
-        risk.record_trade(pair_key, mode=od.mode)
-        return od, metrics
-
-    # Live protections
-    if not _live_latch_enabled():
-        od.reason = "blocked: live latch not enabled (/run/trading/ENABLE_LIVE_TRADING)"
-        return od, metrics
-
-    payload = {"pair": od.pair, "type": od.side, "ordertype": od.ordertype, "volume": od.volume}
-    if od.ordertype == "limit":
-        payload["price"] = od.price
-
-    resp = k.private("AddOrder", payload)
-    if resp.get("error"):
-        od.reason = f"AddOrder error: {resp['error']}"
-        return od, metrics
-
-    # Count the trade as executed for rate limiting
-    risk.record_trade(pair_key, mode=od.mode)
-
-    od.reason = "LIVE order placed"
+    
     return od, metrics

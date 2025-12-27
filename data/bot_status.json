@@ -1,11 +1,11 @@
 {
-  "boot_ts": 1766850587,
+  "boot_ts": 1766853959,
   "cooldowns": {
     "XETHZUSD": {
-      "remaining_s": 12771
+      "remaining_s": 0
     },
     "XXBTZUSD": {
-      "remaining_s": 14212
+      "remaining_s": 14335
     }
   },
   "killed": false,
@@ -21,5 +21,5 @@
     "XETHZUSD"
   ],
   "paused": false,
-  "ts": 1766852344
+  "ts": 1766854471
 }

@@ -29,7 +29,9 @@ class RiskEngine:
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
-        self.fail_closed = bool(cfg.get("safety", {}).get("fail_closed", True))
+        # Handle potential structure mismatch if config root varies
+        safety = cfg.get("safety", {}) or cfg.get("risk", {})
+        self.fail_closed = bool(safety.get("fail_closed", True))
 
         # Controls
         controls = cfg.get("controls", {})
@@ -37,7 +39,7 @@ class RiskEngine:
         self.kill_file = controls.get("kill_switch_file", "/run/trading/KILL_SWITCH")
 
         # Trade limits
-        trade = cfg.get("trade", {})
+        trade = cfg.get("trade", {}) or cfg.get("risk", {})
         self.max_open_positions = int(trade.get("max_open_positions", 0))  # 0 = disabled
         self.max_notional_usd_per_trade = float(trade.get("max_notional_usd_per_trade", 20.0))
 
@@ -51,7 +53,7 @@ class RiskEngine:
         self.count_trades_in_dry_run = bool(trade.get("count_trades_in_dry_run", False))
 
         # Circuit breakers (USD-based)
-        account = cfg.get("account", {})
+        account = cfg.get("account", {}) or cfg.get("risk", {})
         self.max_daily_loss_usd = float(account.get("max_daily_loss_usd", 0.0))
         self.max_drawdown_usd = float(account.get("max_drawdown_usd", 0.0))
 
@@ -221,3 +223,19 @@ class RiskEngine:
         self.trades_today += 1
         if pair:
             self.trades_today_by_pair[pair] = self.trades_today_by_pair.get(pair, 0) + 1
+
+    # -----------------
+    # COMPATIBILITY BRIDGE (ADDED FOR NEW ORDER SYSTEM)
+    # -----------------
+    def check(self, side: str, volume: float, price: float) -> bool:
+        """
+        Adapts the new kraken_orders.py 'check' call to the internal 'can_trade' logic.
+        """
+        notional = volume * price
+        # Defaulting to 'live' mode for strict checking unless context provided otherwise
+        decision = self.can_trade(notional_usd=notional, mode="live")
+        
+        if not decision.allowed:
+            print(f"RISK REJECT: {decision.reason}")
+            return False
+        return True
