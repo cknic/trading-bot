@@ -455,13 +455,25 @@ def preview_order(body: PreviewBody):
     return _compute_order_preview(body.pair, body.side, body.notional_usd)
 
 
+# REPLACE the existing manual_execute function (approx lines 377-407) with this:
+
+# In app/web/server.py, replace the manual_execute function with this STRICTER version:
+
 @app.post("/manual/execute")
 def manual_execute(body: ManualExecuteBody, authorization: Optional[str] = Header(default=None)):
     """
     Queues a one-shot request file for the bot to consume.
-    We keep it gated in the bot (and/or by latch) for safety.
+    SAFETY: Hard-disabled if CONFIG is LIVE (regardless of latch status).
     """
     _require_auth(authorization)
+
+    # SAFETY CHECK: Block if config is Live, even if currently forced to dry_run
+    bs = _read_bot_status()
+    if bs.get("mode_requested") == "live" or bs.get("mode_effective") == "live":
+        raise HTTPException(
+            status_code=403, 
+            detail="SAFETY: Manual execution is hard-disabled in LIVE configuration."
+        )
 
     out = _compute_order_preview(body.pair, body.side, body.notional_usd)
 
@@ -494,7 +506,6 @@ def manual_execute(body: ManualExecuteBody, authorization: Optional[str] = Heade
     out["queue_file"] = path
     out["manual_id"] = req["id"]
     return out
-
 
 # -----------------------------
 # UI
