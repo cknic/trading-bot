@@ -19,7 +19,9 @@ class OrderDecision:
 
 
 def _live_latch_enabled() -> bool:
-    return os.path.exists("/run/trading/ENABLE_LIVE_TRADING")
+    # Use the same env var default as main.py and server.py
+    path = os.environ.get("LIVE_LATCH_FILE", "/run/trading/LIVE_LATCH")
+    return os.path.exists(path)
 
 
 def resolve_pair_info(k: KrakenClient, pair: str) -> Tuple[str, Dict[str, Any]]:
