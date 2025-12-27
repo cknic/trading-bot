@@ -8,7 +8,7 @@ trading:
   mode: "live"          # dry_run | live
   order_type: "limit"      # limit | market
   quote_notional_usd: 20.0
-  poll_seconds: 60
+  poll_seconds: 300
 
 fees:
   taker_fee_pct: 0.26     # Standard Kraken Taker fee (0.26%)

@@ -15,7 +15,7 @@ from exchange.kraken_client import KrakenClient
 from exchange.kraken_orders import place_or_preview, resolve_pair_info
 from exchange.kraken_marketdata import fetch_ohlc_closes
 from risk.risk_engine import RiskEngine
-from strategy.ma_crossover import decide
+from strategy.ma_crossover import decide, calculate_sma # Import calculate_sma to reuse logic
 
 # --- PATHS ---
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -52,18 +52,56 @@ def log_ai(prompt, response, model):
     except Exception as e:
         print(f"Logging Error: {e}")
 
-def ai_call(provider, model, prompt):
-    response = {"status": "simulated", "analysis": "Trend is neutral. Holding pattern."}
-    if provider == "openai" and "OPENAI_API_KEY" in os.environ:
+def get_ai_model_config(ai_cfg):
+    provider = ai_cfg.get("provider", "openai")
+    model = ai_cfg.get("model")
+    if not model and provider in ai_cfg:
+        model = ai_cfg.get(provider, {}).get("model")
+    if not model:
+        model = "gpt-4o-mini"
+    return provider, model
+
+def ai_call(provider, model, base_prompt, market_data_str):
+    full_prompt = f"{base_prompt}\n\nCURRENT MARKET DATA:\n{market_data_str}"
+    
+    clean_response = {"status": "error", "analysis": "AI Request Failed"}
+    
+    if "OPENAI_API_KEY" not in os.environ:
+         clean_response["analysis"] = "Configuration Error: OPENAI_API_KEY missing."
+         log_ai(full_prompt, clean_response, model)
+         return clean_response
+
+    if provider in ("openai", "openrouter"):
         try:
             url = "https://api.openai.com/v1/chat/completions"
             headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
-            payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-            r = requests.post(url, headers=headers, json=payload, timeout=5)
-            if r.status_code == 200: response = r.json()
-        except: pass
-    log_ai(prompt, response, model)
-    return response
+            
+            if provider == "openrouter":
+                # url = "https://openrouter.ai/api/v1/chat/completions"
+                pass 
+
+            payload = {"model": model, "messages": [{"role": "user", "content": full_prompt}]}
+            
+            r = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if r.status_code == 200: 
+                raw = r.json()
+                try:
+                    content = raw['choices'][0]['message']['content']
+                    clean_response = {"status": "success", "analysis": content}
+                except KeyError:
+                    clean_response = {"status": "error", "analysis": "Format Error", "raw": raw}
+            else:
+                err_msg = f"HTTP {r.status_code}: {r.text}"
+                print(f"AI Error: {err_msg}")
+                clean_response["analysis"] = f"AI Provider Error: {err_msg[:200]}"
+                
+        except Exception as e: 
+            print(f"AI Exception: {e}")
+            clean_response["analysis"] = f"AI Connection Failed: {str(e)}"
+
+    log_ai(full_prompt, clean_response, model)
+    return clean_response
 
 def update_realized_pnl(profit_usd):
     try:
@@ -184,7 +222,6 @@ def clear_manual_order():
 
 def execute_trade_logic(k, risk, kcfg, pair, side, amt=None):
     kcfg_orders = safe_kcfg_for_orders(kcfg)
-    
     pos = get_position(pair)
     base_override = pos.get("base_volume") if side == "sell" else None
     entry_price = pos.get("average_price", 0.0) if pos.get("has_position") else 0.0
@@ -206,23 +243,13 @@ def execute_trade_logic(k, risk, kcfg, pair, side, amt=None):
         
         log_trade_csv(pair, side, executed_vol, executed_price, total_cost, od.mode)
         
-        # --- PNL & FEES ---
         if side == "sell" and entry_price > 0:
             gross_pnl = (executed_price - entry_price) * executed_vol
-            
-            # Fee Logic:
-            # 1. Try to read explicit fee from Kraken response (Live Mode)
-            # 2. Fallback to calculation using config (Dry Run)
-            
             real_fee_usd = float(m.get("fee", 0.0))
-            
             if real_fee_usd > 0:
-                # We have real data (LIVE)
                 fees = real_fee_usd
                 fee_source = "KRAKEN_API"
             else:
-                # We simulate (DRY_RUN)
-                # Use configured pct or default to 0.26%
                 fee_pct = float(kcfg.get("fees", {}).get("taker_fee_pct", 0.26)) / 100.0
                 entry_fee = (entry_price * executed_vol) * fee_pct
                 exit_fee = (executed_price * executed_vol) * fee_pct
@@ -230,7 +257,6 @@ def execute_trade_logic(k, risk, kcfg, pair, side, amt=None):
                 fee_source = f"SIMULATED ({fee_pct*100}%)"
 
             net_pnl = gross_pnl - fees
-            
             print(f">> PnL CALC: Gross ${gross_pnl:.6f} - Fees ${fees:.6f} [{fee_source}] = Net ${net_pnl:.6f}")
             update_realized_pnl(net_pnl)
         
@@ -243,6 +269,32 @@ def execute_trade_logic(k, risk, kcfg, pair, side, amt=None):
     else:
         print(f"REJECTED: {od.reason}")
         return False
+
+def generate_market_summary(k, pairs, interval, sma_short, sma_long):
+    """
+    Fetches rich data: Price, Last 5 candles, SMA values.
+    """
+    summary = []
+    for pair in pairs:
+        try:
+            closes = fetch_ohlc_closes(k, pair, interval)
+            if not closes or len(closes) < sma_long: continue
+
+            last_price = closes[-1]
+            last_5 = closes[-5:]
+            
+            # Calculate Indicators for Context
+            val_short = calculate_sma(closes, sma_short)
+            val_long = calculate_sma(closes, sma_long)
+            
+            sma_str = f"SMA({sma_short}): {val_short:.2f} | SMA({sma_long}): {val_long:.2f}" if (val_short and val_long) else "SMA: N/A"
+            prices_str = ", ".join([f"{p:.2f}" for p in last_5])
+
+            line = f"PAIR: {pair}\n - Price: ${last_price:.2f}\n - Recent Closes: [{prices_str}]\n - Indicators: {sma_str}"
+            summary.append(line)
+        except Exception as e:
+            print(f"Data Gen Error {pair}: {e}")
+    return "\n\n".join(summary)
 
 def main():
     print(">>> BOT STARTED <<<")
@@ -263,9 +315,9 @@ def main():
     sma_short = kcfg.get("strategy", {}).get("sma_short", 10)
     sma_long = kcfg.get("strategy", {}).get("sma_long", 30)
     
-    print(f"Poll Interval: {poll_seconds}s")
-    print(f"Strategy Interval: {strategy_interval}m")
-    
+    ai_provider, ai_model = get_ai_model_config(ai_cfg)
+    print(f"AI Provider: {ai_provider} | Model: {ai_model}")
+
     pairs = []
     pair_map = {}
     for p in kcfg["kraken"]["pairs"]:
@@ -276,8 +328,6 @@ def main():
             pair_map[pk] = pk
         except Exception as e:
             print(f"Startup Warning: Could not resolve pair {p}: {e}")
-        
-    print(f"Pairs Resolved: {pairs}")
 
     mode = get_trading_mode(kcfg)
     if mode == "live":
@@ -311,16 +361,27 @@ def main():
             if now - last_check_ts > poll_seconds:
                 print(f"\n--- STRATEGY CHECK ({time.strftime('%H:%M:%S')}) ---")
                 
-                prompt = ai_cfg.get("prompts", {}).get("strategy_decision", "Analyze market.")
-                ai_resp = ai_call(ai_cfg.get("provider"), ai_cfg.get("model", "gpt-4"), prompt)
-                print(f"AI Brain: {ai_resp.get('analysis', 'No analysis')}")
+                try: 
+                    ai_cfg = load_yaml("/config/ai.yaml")
+                    ai_provider, ai_model = get_ai_model_config(ai_cfg)
+                except: pass
+
+                # PASS SMA SETTINGS TO DATA GENERATOR
+                market_data = generate_market_summary(k, pairs, strategy_interval, sma_short, sma_long)
+                prompt_base = ai_cfg.get("prompts", {}).get("strategy_decision", "Analyze market.")
+                
+                ai_resp = ai_call(ai_provider, ai_model, prompt_base, market_data)
+                
+                # CLEAN LOGGING (Text Only)
+                analysis = ai_resp.get("analysis", "No Analysis")
+                print(f"AI Brain ({ai_model}): {analysis[:100]}...")
 
                 for pk in pairs:
                     try:
                         closes = fetch_ohlc_closes(k, pk, interval=strategy_interval)
                         min_candles = kcfg.get("strategy", {}).get("min_candles", 50)
                         if len(closes) < min_candles:
-                            print(f"{pk}: Not enough data ({len(closes)}/{min_candles})")
+                            print(f"{pk}: Not enough data")
                             continue
                             
                         pos_data = get_position(pk)
