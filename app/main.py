@@ -329,6 +329,7 @@ def generate_market_summary(k, pairs, interval, sma_short, sma_long):
     summary = []
     for pair in pairs:
         try:
+            # 1. TACTICAL DATA (Strategy Timeframe, e.g., 60m)
             closes = fetch_ohlc_closes(k, pair, interval)
             if not closes or len(closes) < sma_long: continue
 
@@ -341,10 +342,39 @@ def generate_market_summary(k, pairs, interval, sma_short, sma_long):
             sma_str = f"SMA({sma_short}): {val_short:.2f} | SMA({sma_long}): {val_long:.2f}" if (val_short and val_long) else "SMA: N/A"
             prices_str = ", ".join([f"{p:.2f}" for p in last_5])
 
-            line = f"PAIR: {pair}\n - Price: ${last_price:.2f}\n - Recent Closes: [{prices_str}]\n - Indicators: {sma_str}"
+            # 2. STRATEGIC DATA (Daily / 1440m)
+            # We fetch 1440 (24h) candles to get the "Macro" view
+            try:
+                # 1440 = 24 hours. Get last 2 days to be safe.
+                daily_closes = fetch_ohlc_closes(k, pair, 1440) 
+                if daily_closes and len(daily_closes) >= 1:
+                    # In a real OHLC fetch, we'd want Open/High/Low, 
+                    # but 'fetch_ohlc_closes' returns a list of floats (closes).
+                    # We can infer 'Trend' by comparing Current Price vs 24h ago Price.
+                    price_24h_ago = daily_closes[-2] if len(daily_closes) > 1 else daily_closes[0]
+                    daily_change_pct = ((last_price - price_24h_ago) / price_24h_ago) * 100.0
+                    
+                    macro_str = f"24h Change: {daily_change_pct:+.2f}%"
+                    if daily_change_pct > 3.0: macro_trend = "STRONG BULLISH"
+                    elif daily_change_pct < -3.0: macro_trend = "STRONG BEARISH"
+                    else: macro_trend = "NEUTRAL / CHOPPY"
+                else:
+                    macro_str = "24h Data: N/A"
+                    macro_trend = "UNKNOWN"
+            except:
+                macro_str = "24h Data: Error"
+                macro_trend = "UNKNOWN"
+
+            # 3. COMPILE PROMPT
+            line = (f"PAIR: {pair}\n"
+                    f" - TACTICAL (1h): Price ${last_price:.2f} | {sma_str}\n"
+                    f" - RECENT ACTION: [{prices_str}]\n"
+                    f" - STRATEGIC (24h): {macro_str} | Trend: {macro_trend}")
             summary.append(line)
+            
         except Exception as e:
             print(f"Data Gen Error {pair}: {e}")
+            
     return "\n\n".join(summary)
 
 def main():
