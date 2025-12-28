@@ -1,0 +1,19 @@
+ibkr:
+  host: "ib-gateway"  # Hostname of the Gateway container (or 'host.docker.internal')
+  port: 4002          # 4001 for Gateway, 7497 for TWS Paper, 7496 for TWS Live
+  client_id: 1        # Unique ID for this bot
+  account: ""         # Leave empty to auto-detect, or specify 'DU12345'
+  
+trading:
+  mode: "paper"       # paper | live
+  poll_seconds: 5     # IBKR is faster, we can check risk more often
+
+risk:
+  max_position_usd: 5000
+  max_daily_loss: 200
+  
+universe:
+  stocks:
+    - "NVDA"
+    - "TSLA"
+    - "AAPL"
