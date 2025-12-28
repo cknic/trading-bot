@@ -1,12 +1,12 @@
 # --- PROVIDER SELECTION ---
-provider: "openai"   # Change to "openrouter" to switch
+provider: "openrouter"   # Change to "openrouter" to switch
 
 # --- PROVIDER CONFIGS ---
 openai:
   model: "gpt-5-mini"  # Use valid OpenAI model ID
 
 openrouter:
-  model: "openai/gpt-5-mini" # Your OpenRouter model ID
+  model: "x-ai/grok-4.1-fast" # Your OpenRouter model ID
 
 # --- PROMPTS ---
 prompts:

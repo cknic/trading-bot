@@ -16,7 +16,7 @@ from exchange.kraken_orders import place_or_preview, resolve_pair_info
 from exchange.kraken_marketdata import fetch_ohlc_closes
 from risk.risk_engine import RiskEngine
 from strategy.ma_crossover import decide, calculate_sma
-from strategy.exit import calculate_decaying_stop  # <--- NEW IMPORT
+from strategy.exit import calculate_decaying_stop
 
 # --- PATHS ---
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -38,7 +38,9 @@ REQUIRE_LIVE_LATCH = os.environ.get("REQUIRE_LIVE_LATCH", "1").strip().lower() n
 # ==============================================================================
 
 def load_yaml(path):
-    with open(path, "r") as f: return yaml.safe_load(f)
+    try:
+        with open(path, "r") as f: return yaml.safe_load(f)
+    except: return {}
 
 def log_ai(prompt, response, model):
     entry = {
@@ -64,36 +66,58 @@ def get_ai_model_config(ai_cfg):
 
 def ai_call(provider, model, base_prompt, market_data_str):
     full_prompt = f"{base_prompt}\n\nCURRENT MARKET DATA:\n{market_data_str}"
+    
     clean_response = {"status": "error", "analysis": "AI Request Failed"}
     
-    if "OPENAI_API_KEY" not in os.environ:
-         clean_response["analysis"] = "Configuration Error: OPENAI_API_KEY missing."
+    # 1. Validation
+    if "OPENAI_API_KEY" not in os.environ and "OPENROUTER_API_KEY" not in os.environ:
+         clean_response["analysis"] = "Configuration Error: API Keys missing."
          log_ai(full_prompt, clean_response, model)
          return clean_response
 
-    if provider in ("openai", "openrouter"):
-        try:
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
-            payload = {"model": model, "messages": [{"role": "user", "content": full_prompt}]}
+    # 2. Provider Routing
+    try:
+        url = "https://api.openai.com/v1/chat/completions"
+        api_key = os.environ.get('OPENAI_API_KEY')
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+
+        # OpenRouter Specific Overrides
+        if provider == "openrouter":
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            # Prefer OPENROUTER_API_KEY, fallback to OPENAI_API_KEY
+            api_key = os.environ.get('OPENROUTER_API_KEY', api_key)
+            headers["Authorization"] = f"Bearer {api_key}"
+            headers["HTTP-Referer"] = "http://sentinel-bot"
+            headers["X-Title"] = "Sentinel Trading Bot"
+        
+        # 3. Payload Construction
+        # [FIX] Removed 'temperature' to prevent HTTP 400 errors on strict models (Grok/o1)
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": full_prompt}]
+        }
+        
+        # 4. Execution
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if r.status_code == 200: 
+            raw = r.json()
+            try:
+                content = raw['choices'][0]['message']['content']
+                clean_response = {"status": "success", "analysis": content}
+            except KeyError:
+                clean_response = {"status": "error", "analysis": "Format Error", "raw": raw}
+        else:
+            err_msg = f"HTTP {r.status_code}: {r.text}"
+            print(f"AI Error: {err_msg}")
+            clean_response["analysis"] = f"AI Provider Error: {err_msg[:200]}"
             
-            r = requests.post(url, headers=headers, json=payload, timeout=30)
-            
-            if r.status_code == 200: 
-                raw = r.json()
-                try:
-                    content = raw['choices'][0]['message']['content']
-                    clean_response = {"status": "success", "analysis": content}
-                except KeyError:
-                    clean_response = {"status": "error", "analysis": "Format Error", "raw": raw}
-            else:
-                err_msg = f"HTTP {r.status_code}: {r.text}"
-                print(f"AI Error: {err_msg}")
-                clean_response["analysis"] = f"AI Provider Error: {err_msg[:200]}"
-                
-        except Exception as e: 
-            print(f"AI Exception: {e}")
-            clean_response["analysis"] = f"AI Connection Failed: {str(e)}"
+    except Exception as e: 
+        print(f"AI Exception: {e}")
+        clean_response["analysis"] = f"AI Connection Failed: {str(e)}"
 
     log_ai(full_prompt, clean_response, model)
     return clean_response
@@ -240,7 +264,7 @@ def reconcile_and_sync_positions(k, pairs):
                         "base_volume": real_vol,
                         "average_price": real_avg,
                         "last_update": int(time.time()),
-                        "entry_ts": int(time.time()) # Assume entry is now if syncing from scratch
+                        "entry_ts": int(time.time())
                     }
                     print(f"   -> ADOPTED: {pair} Vol: {real_vol:.6f} @ ${real_avg:.2f}")
                 else:
@@ -329,7 +353,7 @@ def generate_market_summary(k, pairs, interval, sma_short, sma_long):
     summary = []
     for pair in pairs:
         try:
-            # 1. TACTICAL DATA (Strategy Timeframe, e.g., 60m)
+            # 1. TACTICAL (Strategy Timeframe)
             closes = fetch_ohlc_closes(k, pair, interval)
             if not closes or len(closes) < sma_long: continue
 
@@ -342,22 +366,17 @@ def generate_market_summary(k, pairs, interval, sma_short, sma_long):
             sma_str = f"SMA({sma_short}): {val_short:.2f} | SMA({sma_long}): {val_long:.2f}" if (val_short and val_long) else "SMA: N/A"
             prices_str = ", ".join([f"{p:.2f}" for p in last_5])
 
-            # 2. STRATEGIC DATA (Daily / 1440m)
-            # We fetch 1440 (24h) candles to get the "Macro" view
+            # 2. STRATEGIC (Daily)
             try:
-                # 1440 = 24 hours. Get last 2 days to be safe.
                 daily_closes = fetch_ohlc_closes(k, pair, 1440) 
                 if daily_closes and len(daily_closes) >= 1:
-                    # In a real OHLC fetch, we'd want Open/High/Low, 
-                    # but 'fetch_ohlc_closes' returns a list of floats (closes).
-                    # We can infer 'Trend' by comparing Current Price vs 24h ago Price.
                     price_24h_ago = daily_closes[-2] if len(daily_closes) > 1 else daily_closes[0]
                     daily_change_pct = ((last_price - price_24h_ago) / price_24h_ago) * 100.0
                     
                     macro_str = f"24h Change: {daily_change_pct:+.2f}%"
                     if daily_change_pct > 3.0: macro_trend = "STRONG BULLISH"
                     elif daily_change_pct < -3.0: macro_trend = "STRONG BEARISH"
-                    else: macro_trend = "NEUTRAL / CHOPPY"
+                    else: macro_trend = "NEUTRAL"
                 else:
                     macro_str = "24h Data: N/A"
                     macro_trend = "UNKNOWN"
@@ -365,16 +384,13 @@ def generate_market_summary(k, pairs, interval, sma_short, sma_long):
                 macro_str = "24h Data: Error"
                 macro_trend = "UNKNOWN"
 
-            # 3. COMPILE PROMPT
             line = (f"PAIR: {pair}\n"
                     f" - TACTICAL (1h): Price ${last_price:.2f} | {sma_str}\n"
                     f" - RECENT ACTION: [{prices_str}]\n"
                     f" - STRATEGIC (24h): {macro_str} | Trend: {macro_trend}")
             summary.append(line)
-            
         except Exception as e:
             print(f"Data Gen Error {pair}: {e}")
-            
     return "\n\n".join(summary)
 
 def main():
@@ -458,14 +474,20 @@ def main():
                 analysis = ai_resp.get("analysis", "No Analysis")
                 print(f"AI Brain ({ai_model}): {analysis[:100]}...")
 
-                ai_entry_ban = False
-                if "VERDICT: STOP" in analysis:
-                    print(">>> AI GUARDRAIL: RISK MANAGER HAS BLOCKED NEW ENTRIES.")
+                # [FIX] STRICT GUARDRAIL LOGIC
+                # Default to BLOCKED unless "GO" is explicitly found.
+                ai_entry_ban = True 
+                
+                if "VERDICT: GO" in analysis:
+                    print(">>> AI GUARDRAIL: GREEN LIGHT. ENTRIES APPROVED.")
+                    ai_entry_ban = False
+                elif "VERDICT: STOP" in analysis:
+                    print(">>> AI GUARDRAIL: STOP SIGNAL RECEIVED. ENTRIES BLOCKED.")
                     ai_entry_ban = True
-                elif "VERDICT: GO" in analysis:
-                    print(">>> AI GUARDRAIL: RISK MANAGER APPROVED ENTRIES.")
                 else:
-                    print(">>> AI GUARDRAIL: NO CLEAR VERDICT. DEFAULTING TO CAUTION.")
+                    # Catch-all for API Errors, "No Verdict", Ambiguity, or Hallucinations
+                    print(">>> AI GUARDRAIL: NO CLEAR GO SIGNAL (OR ERROR). DEFAULTING TO BLOCK.")
+                    ai_entry_ban = True
 
                 # C. Algo Logic
                 for pk in pairs:
@@ -503,7 +525,7 @@ def main():
                         
                         if signal == "buy":
                             if ai_entry_ban:
-                                print(f">>> AUTO TRADING: BUY {pk} BLOCKED BY AI VERDICT.")
+                                print(f">>> AUTO TRADING: BUY {pk} BLOCKED BY AI VERDICT (OR FAILURE).")
                                 continue
                             print(f">>> AUTO TRADING: BUY {pk}")
                             execute_trade_logic(k, risk, kcfg, pk, signal)
