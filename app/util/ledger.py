@@ -24,13 +24,14 @@ def _save_state(state):
 
 def get_position(pair):
     """
-    Returns dict: { 'has_position': bool, 'base_volume': float, 'average_price': float }
+    Returns dict: { 'has_position': bool, 'base_volume': float, 'average_price': float, 'entry_ts': int }
     """
     state = _load_state()
     return state.get(pair, {
         "has_position": False, 
         "base_volume": 0.0, 
-        "average_price": 0.0
+        "average_price": 0.0,
+        "entry_ts": 0
     })
 
 def set_position(pair, volume, price):
@@ -39,22 +40,33 @@ def set_position(pair, volume, price):
     """
     state = _load_state()
     
-    # In a real bot, you might average down if you already hold it.
-    # For simplicity, we overwrite or add to it.
-    current = state.get(pair, {"base_volume": 0.0, "average_price": 0.0})
+    # Default structure if new
+    current = state.get(pair, {"base_volume": 0.0, "average_price": 0.0, "has_position": False})
     
     new_vol = float(volume)
     # Weighted Average Price logic
-    total_cost = (current["base_volume"] * current["average_price"]) + (new_vol * float(price))
-    total_vol = current["base_volume"] + new_vol
+    current_vol = current.get("base_volume", 0.0)
+    current_avg = current.get("average_price", 0.0)
+    
+    total_cost = (current_vol * current_avg) + (new_vol * float(price))
+    total_vol = current_vol + new_vol
     
     avg_price = total_cost / total_vol if total_vol > 0 else 0.0
+    
+    # LOGIC UPDATE: Preserve entry_ts if adding to existing, else set new.
+    # This prevents resetting the "Stall" timer if we just buy a small amount more.
+    if current.get("has_position") and current.get("entry_ts"):
+        entry_ts = current["entry_ts"]
+    else:
+        entry_ts = int(time.time())
     
     state[pair] = {
         "has_position": True,
         "base_volume": total_vol,
         "average_price": avg_price,
-        "last_update": int(time.time())
+        "entry_ts": entry_ts,
+        "last_update": int(time.time()),
+        "cooldown_until": current.get("cooldown_until", 0) # Preserve cooldown
     }
     _save_state(state)
     print(f"LEDGER: Position Updated for {pair}. Vol: {total_vol:.6f} @ ${avg_price:.2f}")
@@ -65,10 +77,16 @@ def clear_position(pair):
     """
     state = _load_state()
     if pair in state:
-        state[pair]["has_position"] = False
-        state[pair]["base_volume"] = 0.0
-        state[pair]["average_price"] = 0.0
-        state[pair]["last_update"] = int(time.time())
+        # Keep cooldown info, clear position info
+        cooldown = state[pair].get("cooldown_until", 0)
+        state[pair] = {
+            "has_position": False,
+            "base_volume": 0.0,
+            "average_price": 0.0,
+            "entry_ts": 0,
+            "last_update": int(time.time()),
+            "cooldown_until": cooldown
+        }
         _save_state(state)
         print(f"LEDGER: Position Cleared for {pair}")
 

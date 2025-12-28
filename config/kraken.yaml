@@ -29,6 +29,11 @@ strategy:
   sma_long: 30
   min_candles: 60
   simulate_fills_in_dry_run: true
+  decay_exit:
+    initial_stop_pct: 0.10
+    decay_daily_pct: 0.01
+    min_stop_pct: 0.005
+    max_hold_days: 14
 
 cooldown:
   hours_after_trade: 4

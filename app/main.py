@@ -16,6 +16,7 @@ from exchange.kraken_orders import place_or_preview, resolve_pair_info
 from exchange.kraken_marketdata import fetch_ohlc_closes
 from risk.risk_engine import RiskEngine
 from strategy.ma_crossover import decide, calculate_sma
+from strategy.exit import calculate_decaying_stop  # <--- NEW IMPORT
 
 # --- PATHS ---
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -63,7 +64,6 @@ def get_ai_model_config(ai_cfg):
 
 def ai_call(provider, model, base_prompt, market_data_str):
     full_prompt = f"{base_prompt}\n\nCURRENT MARKET DATA:\n{market_data_str}"
-    
     clean_response = {"status": "error", "analysis": "AI Request Failed"}
     
     if "OPENAI_API_KEY" not in os.environ:
@@ -75,10 +75,6 @@ def ai_call(provider, model, base_prompt, market_data_str):
         try:
             url = "https://api.openai.com/v1/chat/completions"
             headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}"}
-            
-            if provider == "openrouter":
-                pass 
-
             payload = {"model": model, "messages": [{"role": "user", "content": full_prompt}]}
             
             r = requests.post(url, headers=headers, json=payload, timeout=30)
@@ -202,79 +198,64 @@ def cancel_all_open_orders(k):
         print(f"Warn: CancelAll exception: {e}")
 
 def reconcile_and_sync_positions(k, pairs):
-    """
-    AUTO-HEAL LOGIC:
-    1. Fetch real positions from Kraken.
-    2. Compare with state.json.
-    3. If mismatch, OVERWRITE state.json with Kraken truth.
-    """
     print("SAFETY: Syncing State with Kraken Reality...")
     try:
         resp = k.private("OpenPositions")
         if resp.get("error"): 
             print(f"Kraken Error during sync: {resp['error']}")
-            return False # Failed to sync, safe to abort
+            return False
 
         kraken_pos = resp.get("result", {})
         
-        # 1. Aggregate Kraken Data (Sum volumes per pair)
         real_positions = defaultdict(lambda: {"vol": 0.0, "cost": 0.0})
         for txid, info in kraken_pos.items():
             p = info['pair']
             vol = float(info['vol']) - float(info['vol_closed'])
-            cost = float(info['cost']) # Total cost basis
+            cost = float(info['cost']) 
             if vol > 0.000001: 
                 real_positions[p]["vol"] += vol
                 real_positions[p]["cost"] += cost
         
-        # 2. Load Local State
         local_state = {}
         if os.path.exists(STATE_JSON):
             with open(STATE_JSON, 'r') as f: local_state = json.load(f)
 
-        # 3. Heal Mismatches
         updates_made = False
         
         for pair in pairs:
-            # Kraken Data
             real_vol = real_positions[pair]["vol"]
             real_cost = real_positions[pair]["cost"]
             real_has = real_vol > 0.0001
             real_avg = (real_cost / real_vol) if real_vol > 0 else 0.0
 
-            # Local Data
             local_has = local_state.get(pair, {}).get("has_position", False)
             local_vol = float(local_state.get(pair, {}).get("base_volume", 0.0))
 
-            # Logic: If reality differs from file, TRUST REALITY
             if abs(real_vol - local_vol) > 0.0001 or (real_has != local_has):
                 print(f">> SYNC: Mismatch on {pair}. Local: {local_vol} | Kraken: {real_vol}")
                 
                 if real_has:
-                    # Adopt the position
                     local_state[pair] = {
                         "has_position": True,
                         "base_volume": real_vol,
                         "average_price": real_avg,
-                        "last_update": int(time.time())
+                        "last_update": int(time.time()),
+                        "entry_ts": int(time.time()) # Assume entry is now if syncing from scratch
                     }
                     print(f"   -> ADOPTED: {pair} Vol: {real_vol:.6f} @ ${real_avg:.2f}")
                 else:
-                    # Clear the ghost position
-                    if pair in local_state:
-                        del local_state[pair]
+                    if pair in local_state: del local_state[pair]
                     print(f"   -> CLEARED: {pair} (Not on Kraken)")
                 
                 updates_made = True
 
-        # 4. Save if changed
         if updates_made:
             with open(STATE_JSON, 'w') as f: json.dump(local_state, f, indent=2)
             print(">> SYNC COMPLETE: Local State updated to match Kraken.")
         else:
             print(">> SYNC OK: Local State matches Kraken.")
             
-        return True # Success
+        return True
 
     except Exception as e: 
         print(f"Sync Exception: {e}")
@@ -401,11 +382,8 @@ def main():
 
     mode = get_trading_mode(kcfg)
     
-    # --- STARTUP SYNC LOGIC ---
     if mode == "live":
         cancel_all_open_orders(k)
-        
-        # New logic: Sync instead of Abort
         sync_ok = reconcile_and_sync_positions(k, pairs)
         if not sync_ok:
             print("CRITICAL: Failed to sync with Kraken. Aborting for safety.")
@@ -471,6 +449,25 @@ def main():
                         pos_data = get_position(pk)
                         has_pos = pos_data.get("has_position", False)
                         
+                        # [NEW] DECAYING STOP-LOSS CHECK
+                        if has_pos:
+                            entry_price = float(pos_data.get("average_price", 0.0))
+                            entry_ts = int(pos_data.get("entry_ts", time.time())) 
+                            decay_cfg = kcfg.get("strategy", {}).get("decay_exit", {})
+                            
+                            should_exit, exit_reason = calculate_decaying_stop(
+                                entry_price, 
+                                entry_ts, 
+                                closes[-1], 
+                                decay_cfg
+                            )
+                            
+                            if should_exit:
+                                print(f">>> EXIT SIGNAL: {exit_reason}")
+                                execute_trade_logic(k, risk, kcfg, pk, "sell")
+                                continue # Skip SMA check, we are exiting.
+
+                        # Standard SMA Logic
                         signal, reason = decide(closes, sma_short, sma_long, has_pos)
                         print(f"{pk}: Signal={signal.upper()} | {reason}")
                         
