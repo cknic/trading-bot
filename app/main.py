@@ -428,6 +428,7 @@ def main():
 
     mode = get_trading_mode(kcfg)
     
+    # --- STARTUP SYNC LOGIC ---
     if mode == "live":
         cancel_all_open_orders(k)
         sync_ok = reconcile_and_sync_positions(k, pairs)
@@ -466,30 +467,23 @@ def main():
                     ai_provider, ai_model = get_ai_model_config(ai_cfg)
                 except: pass
 
+                # 1. AI ANALYSIS
                 market_data = generate_market_summary(k, pairs, strategy_interval, sma_short, sma_long)
                 prompt_base = ai_cfg.get("prompts", {}).get("strategy_decision", "Analyze market.")
                 
                 ai_resp = ai_call(ai_provider, ai_model, prompt_base, market_data)
-                
                 analysis = ai_resp.get("analysis", "No Analysis")
-                print(f"AI Brain ({ai_model}): {analysis[:100]}...")
-
-                # [FIX] STRICT GUARDRAIL LOGIC
-                # Default to BLOCKED unless "GO" is explicitly found.
-                ai_entry_ban = True 
                 
+                # Parse AI Verdict
+                ai_vote = "NEUTRAL"
                 if "VERDICT: GO" in analysis:
-                    print(">>> AI GUARDRAIL: GREEN LIGHT. ENTRIES APPROVED.")
-                    ai_entry_ban = False
+                    ai_vote = "GO"
                 elif "VERDICT: STOP" in analysis:
-                    print(">>> AI GUARDRAIL: STOP SIGNAL RECEIVED. ENTRIES BLOCKED.")
-                    ai_entry_ban = True
-                else:
-                    # Catch-all for API Errors, "No Verdict", Ambiguity, or Hallucinations
-                    print(">>> AI GUARDRAIL: NO CLEAR GO SIGNAL (OR ERROR). DEFAULTING TO BLOCK.")
-                    ai_entry_ban = True
+                    ai_vote = "STOP"
+                
+                print(f"AI Brain ({ai_model}): {ai_vote} | {analysis[:100]}...")
 
-                # C. Algo Logic
+                # 2. ALGO ANALYSIS
                 for pk in pairs:
                     try:
                         closes = fetch_ohlc_closes(k, pk, interval=strategy_interval)
@@ -501,38 +495,49 @@ def main():
                         pos_data = get_position(pk)
                         has_pos = pos_data.get("has_position", False)
                         
-                        # [NEW] DECAYING STOP-LOSS CHECK
-                        if has_pos:
-                            entry_price = float(pos_data.get("average_price", 0.0))
-                            entry_ts = int(pos_data.get("entry_ts", time.time())) 
-                            decay_cfg = kcfg.get("strategy", {}).get("decay_exit", {})
-                            
-                            should_exit, exit_reason = calculate_decaying_stop(
-                                entry_price, 
-                                entry_ts, 
-                                closes[-1], 
-                                decay_cfg
-                            )
-                            
-                            if should_exit:
-                                print(f">>> EXIT SIGNAL: {exit_reason}")
-                                execute_trade_logic(k, risk, kcfg, pk, "sell")
-                                continue # Skip SMA check, we are exiting.
+                        # [Decaying Stop Check would go here if enabled]
 
                         # Standard SMA Logic
                         signal, reason = decide(closes, sma_short, sma_long, has_pos)
-                        print(f"{pk}: Signal={signal.upper()} | {reason}")
+                        
+                        # 3. DECISION SYNTHESIS (The Executive Logic)
+                        final_action = "HOLD"
                         
                         if signal == "buy":
-                            if ai_entry_ban:
-                                print(f">>> AUTO TRADING: BUY {pk} BLOCKED BY AI VERDICT (OR FAILURE).")
-                                continue
-                            print(f">>> AUTO TRADING: BUY {pk}")
-                            execute_trade_logic(k, risk, kcfg, pk, signal)
-                        
+                            if ai_vote == "STOP":
+                                print(f">>> BLOCKED: SMA Buy Signal vetoed by AI.")
+                                final_action = "HOLD"
+                            elif ai_vote == "NEUTRAL":
+                                print(f">>> BLOCKED: SMA Buy Signal blocked by AI Uncertainty.")
+                                final_action = "HOLD"
+                            else:
+                                final_action = "BUY"
+                                
+                        elif signal == "hold":
+                            if ai_vote == "GO" and not has_pos:
+                                print(f">>> OVERRIDE: SMA is Neutral, but AI signals GO. Forcing Entry.")
+                                final_action = "BUY"
+                            else:
+                                final_action = "HOLD"
+                                
                         elif signal == "sell":
-                            print(f">>> AUTO TRADING: SELL {pk}")
-                            execute_trade_logic(k, risk, kcfg, pk, signal)
+                            if ai_vote == "GO":
+                                print(f">>> SAVE: SMA Sell Signal overridden by Bullish AI.")
+                                final_action = "HOLD"
+                            else:
+                                final_action = "SELL"
+                        
+                        # 4. EXECUTION
+                        if final_action == "BUY":
+                            print(f">>> EXECUTION: BUY {pk}")
+                            execute_trade_logic(k, risk, kcfg, pk, "buy")
+                        elif final_action == "SELL":
+                            print(f">>> EXECUTION: SELL {pk}")
+                            execute_trade_logic(k, risk, kcfg, pk, "sell")
+                        else:
+                            # Optional: print hold status periodically
+                            # print(f"{pk}: Holding ({reason})")
+                            pass
                             
                     except Exception as e:
                         print(f"Strategy Error on {pk}: {e}")
@@ -558,6 +563,3 @@ def main():
             print(f"LOOP ERROR: {e}")
             traceback.print_exc()
             time.sleep(5)
-
-if __name__ == "__main__":
-    main()

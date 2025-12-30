@@ -43,5 +43,54 @@ services:
       - "8080:8080"
     command: ["uvicorn", "app.web.server:app", "--host", "0.0.0.0", "--port", "8080"]
 
+  # ----------------------------------------------------------------
+  # PHASE 2: IBKR STOCK TRADING
+  # ----------------------------------------------------------------
+  
+  # The Connection Portal (Headless IB Gateway)
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    container_name: sent_gateway
+    restart: always
+    ports:
+      - "4001:4001"
+      - "4002:4002"
+    env_file:
+      - /run/trading/secrets.env
+    environment:
+      - TRADING_MODE=paper
+      - ALLOWED_IPS=yes
+      # --- NEW AUTO-PILOT SETTINGS ---
+      # 1. If another session exists (e.g. your browser), kick it off and take over.
+      - EXISTING_SESSION_DETECTED_ACTION=primary
+      # 2. Auto-accept API connections (prevents "Accept Connection?" popups)
+      - ACCEPT_INCOMING_CONNECTION_ACTION=accept
+      # 3. Aggressively dismiss standard warnings
+      - BYPASS_WARNINGS=true
+      - IGNORE_IB_WARNINGS=yes
+    volumes:
+      - ./data/ibkr_settings:/root/Jts
+
+  # The Execution Engine (Stocks)
+  bot-stocks:
+    build:
+      context: .                  # <--- FIXED: Build from root
+      dockerfile: app/Dockerfile  # <--- FIXED: Point to file
+    image: trading-bot-stocks     # Added image tag for clarity
+    container_name: sent_bot_stocks
+    restart: unless-stopped
+    # <--- FIXED: Path matches where Dockerfile put the code (/app/app/...)
+    command: ["python", "-u", "/app/app/main_stocks.py"] 
+    volumes:
+      - ./config:/config:ro
+      - ./data:/data
+      - trading-run:/run/trading
+    environment:
+      - DATA_DIR=/data
+      - IBKR_API_PORT=4001
+      - REQUIRE_LIVE_LATCH=1
+    depends_on:
+      - ib-gateway
+
 volumes:
   trading-run:
