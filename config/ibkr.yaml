@@ -1,19 +1,43 @@
 ibkr:
-  host: "ib-gateway"  # Hostname of the Gateway container (or 'host.docker.internal')
-  port: 4002          # 4001 for Gateway, 7497 for TWS Paper, 7496 for TWS Live
-  client_id: 1        # Unique ID for this bot
-  account: ""         # Leave empty to auto-detect, or specify 'DU12345'
-  
+  host: "ib-gateway"
+  port: 4002          # The code will override this to 4004 if the ENV var is set, but 4002 is a good fallback
+  client_id: 1
+  account: ""         # Leave empty to auto-detect
+
 trading:
-  mode: "paper"       # paper | live
-  poll_seconds: 5     # IBKR is faster, we can check risk more often
+  mode: "paper"
+  poll_seconds: 5     # IBKR is fast, so 5 seconds is good for responsiveness
 
 risk:
   max_position_usd: 5000
   max_daily_loss: 200
-  
+
 universe:
   stocks:
-    - "NVDA"
-    - "TSLA"
-    - "AAPL"
+    # --- TECH / AI / SEMIS ---
+    - "NVDA"  # AI Leader
+    - "AMD"   # Semis Beta
+    - "INTC"  # Value Volatility
+    - "IONQ"  # Quantum AI Speculation
+    
+    # --- FINTECH / CRYPTO ---
+    - "SOFI"  # Retail Favorite
+    - "UPST"  # AI Lending Volatility
+    - "COIN"  # Crypto Proxy
+    
+    # --- FINANCIALS ---
+    - "BAC"   # Rate Sensitive
+    - "ARCC"  # Dividend Swing
+    
+    # --- ENERGY / INFRASTRUCTURE ---
+    - "ET"    # Pipeline Volatility
+    - "EPD"   # Midstream Stability
+    
+    # --- DEFENSIVE / VALUE ---
+    - "F"     # Auto Cyclical
+    - "PFE"   # Pharma Reversion
+    - "T"     # Telecom Yield
+    
+    # --- ETFs (Benchmarks) ---
+    - "QQQ"
+    - "IWM"

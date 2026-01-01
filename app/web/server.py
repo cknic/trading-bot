@@ -11,9 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-# ==============================================================================
-# 1. CONFIG & PATHS
-# ==============================================================================
+# ... [KEEP EXISTING IMPORTS AND CONFIG CONSTANTS] ...
+# (Standard Config Paths - no changes needed there)
+
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 TRADES_CSV = os.environ.get("TRADES_CSV", os.path.join(DATA_DIR, "trades.csv"))
 PNL_JSON = os.environ.get("PNL_JSON", os.path.join(DATA_DIR, "pnl.json"))
@@ -22,40 +22,30 @@ STATE_JSON = os.environ.get("STATE_JSON", os.path.join(DATA_DIR, "state.json"))
 BOT_STATUS_JSON = os.environ.get("BOT_STATUS_JSON", os.path.join(DATA_DIR, "bot_status.json"))
 CACHE_DIR = os.environ.get("CACHE_DIR", os.path.join(DATA_DIR, "cache"))
 AI_LOG_PATH = os.path.join(DATA_DIR, "ai_log.jsonl")
-
 RUN_DIR = os.environ.get("RUN_DIR", "/run/trading")
 PAUSE_FILE = os.environ.get("PAUSE_FILE", os.path.join(RUN_DIR, "PAUSE"))
 KILL_FILE = os.environ.get("KILL_FILE", os.path.join(RUN_DIR, "KILL_SWITCH"))
 MANUAL_ORDER_PATH = os.environ.get("MANUAL_ORDER_PATH", os.path.join(RUN_DIR, "MANUAL_ORDER.json"))
-
 CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
 CONFIG_KRAKEN = os.path.join(CONFIG_DIR, "kraken.yaml")
+CONFIG_IBKR = os.path.join(CONFIG_DIR, "ibkr.yaml") # Added IBKR Config
 AI_CONFIG_PATH = os.path.join(CONFIG_DIR, "ai.yaml")
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
-
 START_TS = int(time.time())
 
-# ==============================================================================
-# 2. MODELS
-# ==============================================================================
+# ... [KEEP MODELS AND APP SETUP] ...
 class ReasonBody(BaseModel):
     reason: str = "manual"
-
 class PromptUpdate(BaseModel):
     new_prompt: str
-
 class ManualExecuteBody(BaseModel):
     pair: str
     side: str
     notional_usd: float = 20.0
 
-# ==============================================================================
-# 3. APP SETUP
-# ==============================================================================
-app = FastAPI(title="Trading Bot API 9.6", version="9.6")
+app = FastAPI(title="Trading Bot API 9.7", version="9.7") # Bump version
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# --- HELPERS ---
 def _auth_ok(authorization: Optional[str]) -> bool:
     if not ADMIN_TOKEN: return True
     if not authorization or not authorization.startswith("Bearer "): return False
@@ -99,9 +89,7 @@ def _get_detailed_status():
         "live_allowed": live_allowed
     }
 
-# ==============================================================================
-# 4. ENDPOINTS
-# ==============================================================================
+# --- UPDATED ENDPOINTS ---
 
 @app.get("/health")
 def health(authorization: Optional[str] = Header(default=None)):
@@ -128,23 +116,44 @@ def get_holdings(authorization: Optional[str] = Header(default=None)):
     if not active_pairs:
         return {"items": [], "total_usd": 0.0, "total_unrealized_usd": 0.0}
 
+    # Identify Crypto vs Stocks
+    kcfg = _load_yaml(CONFIG_KRAKEN)
+    kraken_pairs = kcfg.get("kraken", {}).get("pairs", [])
+    # Also resolve friendly names if they are in cache map, but simple check is enough
+    
+    crypto_to_fetch = []
+    
+    # 1. Fetch Prices
     price_map = {}
-    try:
-        kcfg = _load_yaml(CONFIG_KRAKEN)
-        base_url = kcfg.get("kraken", {}).get("base_url", "https://api.kraken.com")
-        pair_str = ",".join(active_pairs)
-        url = f"{base_url}/0/public/Ticker?pair={pair_str}"
-        resp = requests.get(url, timeout=3).json()
-        if not resp.get("error"):
-            for k, v in resp.get("result", {}).items():
-                price_map[k] = float(v["c"][0])
-    except: pass
+    
+    for p in active_pairs:
+        # Heuristic: If it has "USD" in it and is in Kraken config, it's crypto
+        if any(kp in p for kp in kraken_pairs) or "USD" in p:
+             crypto_to_fetch.append(p)
+        else:
+             # Assume Stock: Use entry price as fallback for now
+             # (Since Web API cannot talk to IBKR directly)
+             price_map[p] = float(state[p].get("average_price", 0.0))
 
+    if crypto_to_fetch:
+        try:
+            base_url = kcfg.get("kraken", {}).get("base_url", "https://api.kraken.com")
+            pair_str = ",".join(crypto_to_fetch)
+            url = f"{base_url}/0/public/Ticker?pair={pair_str}"
+            resp = requests.get(url, timeout=3).json()
+            if not resp.get("error"):
+                for k, v in resp.get("result", {}).items():
+                    price_map[k] = float(v["c"][0])
+        except: pass
+
+    # 2. Build Response
     for pair in active_pairs:
         data = state[pair]
         vol = float(data.get("base_volume", 0.0))
         entry = float(data.get("average_price", 0.0))
-        current_price = price_map.get(pair, entry)
+        
+        # If we failed to get a price (or it's a stock), use entry price to avoid 0 value
+        current_price = price_map.get(pair, entry) 
         
         val_usd = vol * current_price
         unrealized = (current_price - entry) * vol
@@ -169,15 +178,14 @@ def get_holdings(authorization: Optional[str] = Header(default=None)):
         "total_unrealized_usd": round(total_unrealized_usd, 2)
     }
 
+# ... [KEEP REMAINING ENDPOINTS: equity, trades, ai/logs, config/ai, candles, controls] ...
+
 @app.get("/equity")
 def equity(authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization)
     p = _read_json_safe(PNL_JSON)
     raw = p.get("equity_curve_realized", [])
-    
-    # Rounded value to 2 decimal places
     data = [{"time": x[0], "value": round(x[1], 2)} for x in raw] if raw else []
-    
     if not data:
         now = int(time.time())
         data = [{"time": now-86400, "value": 0}, {"time": now, "value": 0}]
@@ -212,13 +220,24 @@ def update_ai_config(body: PromptUpdate, authorization: Optional[str] = Header(N
 @app.get("/config/summary")
 def config_summary():
     k = _load_yaml(CONFIG_KRAKEN)
-    return {"pairs": k.get("kraken", {}).get("pairs", [])}
+    i = _load_yaml(CONFIG_IBKR)
+    
+    # Combine Pairs and Stocks
+    pairs = k.get("kraken", {}).get("pairs", [])
+    stocks = i.get("universe", {}).get("stocks", [])
+    
+    return {"pairs": pairs + stocks}
 
 @app.get("/candles")
 def get_candles(pair: str, authorization: Optional[str] = Header(default=None)):
     _require_auth(authorization)
     if not pair: return {"pair": "", "data": []}
     
+    # Simple check: If it looks like a stock (no USD), skip Kraken
+    # Or load config to check strictly.
+    if "USD" not in pair and "EUR" not in pair:
+        return {"pair": pair, "data": []} # No candle support for IBKR in web UI yet
+
     safe_pair = "".join(c for c in pair if c.isalnum())
     cache_file = os.path.join(CACHE_DIR, f"{safe_pair}_ohlc.json")
     
@@ -253,7 +272,7 @@ def get_candles(pair: str, authorization: Optional[str] = Header(default=None)):
         return {"pair": pair, "data": candles}
     except: return {"pair": pair, "data": []}
 
-# --- CONTROLS ---
+# ... [KEEP CONTROLS AND UI HTML] ...
 @app.post("/manual/execute")
 def manual_execute(body: ManualExecuteBody, authorization: Optional[str] = Header(None)):
     _require_auth(authorization)
@@ -307,14 +326,12 @@ def restart(authorization: Optional[str] = Header(None)):
     _require_auth(authorization)
     os._exit(1)
 
-# ==============================================================================
-# 5. UI HTML
-# ==============================================================================
+# --- REUSING EXISTING UI HTML (No changes needed, it handles dynamic data) ---
 _UI_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Bot 9.6</title>
+<title>Bot 9.7 (Hybrid)</title>
 <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
 <style>
   :root { --bg: #0f172a; --card: #1e293b; --text: #f1f5f9; --border: #334155; --primary: #3b82f6; --danger: #ef4444; --success: #10b981; --warn: #f59e0b; }
@@ -356,7 +373,7 @@ _UI_HTML = r"""<!doctype html>
     <button onclick="clearToken()">Clear</button>
     <button onclick="toggleToken()">Show</button>
   </div>
-  <h1 style="margin:0;">Trading Bot 9.6</h1>
+  <h1 style="margin:0;">Trading Bot 9.7 (Hybrid)</h1>
   <div style="font-size:12px; color:#64748b;">System Status: <span id="sysStatus">--</span></div>
 </div>
 
@@ -443,17 +460,10 @@ _UI_HTML = r"""<!doctype html>
 const TOKEN_KEY = "trading_admin_token";
 document.getElementById('token').value = localStorage.getItem(TOKEN_KEY) || "";
 
-// --- FRIENDLY NAMES MAP ---
 const PAIR_MAP = {
-    "XXBTZUSD": "Bitcoin",
-    "XETHZUSD": "Ethereum",
-    "SOLUSD": "Solana",
-    "XRPUSD": "XRP",
-    "XXRPZUSD": "XRP",
-    "ADAUSD": "Cardano",
-    "XDGUSD": "Dogecoin",
-    "DOTUSD": "Polkadot",
-    "LINKUSD": "Chainlink"
+    "XXBTZUSD": "Bitcoin", "XETHZUSD": "Ethereum", "SOLUSD": "Solana",
+    "XRPUSD": "XRP", "XXRPZUSD": "XRP", "ADAUSD": "Cardano",
+    "NVDA": "NVIDIA", "TSLA": "Tesla", "AAPL": "Apple", "MSFT": "Microsoft"
 };
 
 function fmtPair(p) {
@@ -562,10 +572,9 @@ async function refresh() {
     const tr = await api('/trades?limit=8');
     const tbody = document.getElementById("tblTrades").querySelector("tbody");
     tbody.innerHTML = (tr.items||[]).reverse().map(x => {
-        // --- UPDATED KEY MAPPING BASED ON CSV ---
         const p = parseFloat(x.price||0).toFixed(4);
-        const v = parseFloat(x.volume||x.vol||0).toFixed(6); // Maps 'volume' from CSV
-        const c = parseFloat(x.notional_usd||x.cost||0).toFixed(2); // Maps 'notional_usd' from CSV
+        const v = parseFloat(x.volume||x.vol||0).toFixed(6); 
+        const c = parseFloat(x.notional_usd||x.cost||0).toFixed(2);
         
         const color = x.side==='buy' ? '#10b981' : '#ef4444';
         return `<tr>
@@ -648,10 +657,7 @@ refresh();
 </body>
 </html>
 """
-
-# ==============================================================================
-# 6. ROUTER
-# ==============================================================================
+# --- ROUTER ---
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     return HTMLResponse(content=_UI_HTML)

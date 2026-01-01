@@ -3,3 +3,6 @@ requests==2.32.3
 fastapi
 uvicorn[standard]
 ib_insync==0.9.86
+tzdata
+pandas
+ta

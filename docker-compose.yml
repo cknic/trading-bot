@@ -52,9 +52,11 @@ services:
     image: ghcr.io/gnzsnz/ib-gateway:stable
     container_name: sent_gateway
     restart: always
+    privileged: true
     ports:
       - "4001:4001"
       - "4002:4002"
+      - "5900:5900"
     env_file:
       - /run/trading/secrets.env
     environment:
@@ -68,6 +70,8 @@ services:
       # 3. Aggressively dismiss standard warnings
       - BYPASS_WARNINGS=true
       - IGNORE_IB_WARNINGS=yes
+      - VNC_SERVER_PASSWORD=123456
+      - DISPLAY=:0
     volumes:
       - ./data/ibkr_settings:/root/Jts
 
@@ -80,6 +84,8 @@ services:
     container_name: sent_bot_stocks
     restart: unless-stopped
     # <--- FIXED: Path matches where Dockerfile put the code (/app/app/...)
+    env_file:
+      - /run/trading/secrets.env
     command: ["python", "-u", "/app/app/main_stocks.py"] 
     volumes:
       - ./config:/config:ro
@@ -87,7 +93,7 @@ services:
       - trading-run:/run/trading
     environment:
       - DATA_DIR=/data
-      - IBKR_API_PORT=4001
+      - IBKR_API_PORT=4004
       - REQUIRE_LIVE_LATCH=1
     depends_on:
       - ib-gateway
