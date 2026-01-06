@@ -6,11 +6,13 @@ import yaml
 import requests
 from typing import Dict, Any, List, Tuple
 
-TRADES_DEFAULT = "/data/trades.csv"
-OUT_DEFAULT = "/data/pnl.json"
-IBKR_CONFIG_PATH = "/config/ibkr.yaml"
-KRAKEN_CONFIG_PATH = "/config/kraken.yaml"
-CACHE_DIR = "/data/cache"
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+TRADES_DEFAULT = os.path.join(DATA_DIR, "trades.csv")
+OUT_DEFAULT = os.path.join(DATA_DIR, "pnl.json")
+CLOSED_TRADES_PATH = os.path.join(DATA_DIR, "closed_trades.jsonl")
+IBKR_CONFIG_PATH = "config/ibkr.yaml"
+KRAKEN_CONFIG_PATH = "config/kraken.yaml"
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
 
 # Default fee percentages
 DEFAULT_CRYPTO_FEE_PCT = 0.26  # Kraken taker fee (0.26%)
@@ -43,6 +45,7 @@ def _read_trades(path: str) -> List[Dict[str, Any]]:
                         "price": float(row["price"]),
                         "notional_usd": float(row["notional_usd"]),
                         "mode": row.get("mode", ""),
+                        "reason": row.get("reason", ""),
                     }
                 )
             except Exception:
@@ -58,19 +61,15 @@ def _pair_round(x: float) -> float:
 def _is_crypto_pair(pair: str) -> bool:
     """Determine if a pair is crypto based on naming patterns"""
     pair_upper = pair.upper()
-    # Kraken pairs typically have USD suffix
     crypto_symbols = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "XBT", "LTC", "DOT", "AVAX", "MATIC", "LINK"]
     for sym in crypto_symbols:
         if sym in pair_upper:
             return True
-    # Kraken format: XXBTZUSD, XETHZUSD, etc.
     if pair_upper.startswith("X") and "USD" in pair_upper and len(pair_upper) >= 7:
         return True
-    # Simple format: SOLUSD, ADAUSD
     if pair_upper.endswith("USD") and len(pair_upper) >= 6:
-        # Check it's not a stock ticker
         base = pair_upper.replace("USD", "")
-        if len(base) >= 3:  # Crypto bases are usually 3+ chars
+        if len(base) >= 3:
             return True
     return False
 
@@ -93,16 +92,12 @@ def _fetch_kraken_prices(pairs: List[str]) -> Dict[str, float]:
         
         if not data.get("error"):
             for kraken_pair, ticker_data in data.get("result", {}).items():
-                # Kraken returns different key names, map back to our pairs
-                last_price = float(ticker_data["c"][0])  # "c" = last trade closed [price, lot volume]
-                
-                # Try to match back to original pair name
+                last_price = float(ticker_data["c"][0])
                 for orig_pair in pairs:
                     if orig_pair.upper() in kraken_pair.upper() or kraken_pair.upper() in orig_pair.upper():
                         prices[orig_pair] = last_price
                         break
                 else:
-                    # Direct match attempt
                     prices[kraken_pair] = last_price
     except Exception as e:
         print(f"Kraken price fetch error: {e}")
@@ -119,7 +114,6 @@ def _load_stock_prices_from_cache() -> Dict[str, float]:
     for filename in os.listdir(CACHE_DIR):
         if filename.endswith("_ohlc.json"):
             symbol = filename.replace("_ohlc.json", "")
-            # Skip crypto pairs (they have longer names with USD)
             if _is_crypto_pair(symbol):
                 continue
             try:
@@ -128,7 +122,6 @@ def _load_stock_prices_from_cache() -> Dict[str, float]:
                     cache_data = json.load(f)
                     candles = cache_data.get("data", [])
                     if candles:
-                        # Get the last candle's close price [o, h, l, c]
                         last_candle = candles[-1]
                         y_values = last_candle.get("y", [0, 0, 0, 0])
                         close_price = y_values[3] if len(y_values) >= 4 else 0
@@ -159,13 +152,8 @@ def _calculate_ibkr_fee(shares: float, price: float, ibkr_cfg: Dict[str, Any]) -
     minimum_usd = fees_cfg.get("minimum_usd", 0.35)
     maximum_pct = fees_cfg.get("maximum_pct", 1.0) / 100.0
     
-    # Calculate based on shares
     share_fee = abs(shares) * per_share
-    
-    # Apply minimum
     fee = max(share_fee, minimum_usd)
-    
-    # Apply maximum (1% of trade value)
     notional = abs(shares * price)
     max_fee = notional * maximum_pct
     fee = min(fee, max_fee)
@@ -182,6 +170,43 @@ def _get_fee(pair: str, volume: float, price: float, notional: float,
         return _calculate_ibkr_fee(volume, price, ibkr_cfg)
 
 
+def _get_friendly_name(pair: str) -> str:
+    """Convert pair to friendly display name"""
+    names = {
+        "XXBTZUSD": "BTC", "XETHZUSD": "ETH", "SOLUSD": "SOL",
+        "XXRPZUSD": "XRP", "ADAUSD": "ADA", "XDGUSD": "DOGE",
+        "DOTUSD": "DOT", "LINKUSD": "LINK", "MATICUSD": "MATIC",
+    }
+    return names.get(pair, pair)
+
+
+def _load_logged_close_ids(path: str) -> set:
+    """Load set of already-logged close trade IDs to prevent duplicates"""
+    logged = set()
+    if not os.path.exists(path):
+        return logged
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                if line.strip():
+                    entry = json.loads(line)
+                    trade_id = f"{entry.get('entry_ts', 0)}_{entry.get('exit_ts', 0)}_{entry.get('pair', '')}"
+                    logged.add(trade_id)
+    except Exception:
+        pass
+    return logged
+
+
+def _log_closed_trade(closed_trade: Dict[str, Any], path: str = CLOSED_TRADES_PATH) -> None:
+    """Append a closed trade to the JSONL log"""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            f.write(json.dumps(closed_trade) + "\n")
+    except Exception as e:
+        print(f"Failed to log closed trade: {e}")
+
+
 def compute_pnl(
     trades: List[Dict[str, Any]],
     marks: Dict[str, float],
@@ -190,6 +215,7 @@ def compute_pnl(
     """
     Compute PnL with accurate fee calculation for both Kraken and IBKR.
     Auto-fetches live prices for any pairs with missing marks.
+    Logs closed trades to closed_trades.jsonl.
     """
     if cfg is None:
         cfg = {}
@@ -201,7 +227,6 @@ def compute_pnl(
     # Load stock prices from cache as fallback
     cache_prices = _load_stock_prices_from_cache()
     
-    # Merge cache prices with provided marks (provided marks take priority)
     for symbol, price in cache_prices.items():
         if symbol not in marks or marks.get(symbol, 0) == 0:
             marks[symbol] = price
@@ -214,12 +239,14 @@ def compute_pnl(
         if _is_crypto_pair(pair) and (pair not in marks or marks.get(pair, 0) == 0):
             crypto_pairs_needing_prices.append(pair)
     
-    # Fetch live Kraken prices for crypto pairs missing marks
     if crypto_pairs_needing_prices:
         live_crypto_prices = _fetch_kraken_prices(crypto_pairs_needing_prices)
         for pair, price in live_crypto_prices.items():
             if price > 0:
                 marks[pair] = price
+    
+    # Load already-logged closed trades to prevent duplicates
+    logged_close_ids = _load_logged_close_ids(CLOSED_TRADES_PATH)
     
     per_pair: Dict[str, Any] = {}
     portfolio = {
@@ -234,7 +261,7 @@ def compute_pnl(
         "max_drawdown_usd": 0.0,
     }
     
-    open_pos: Dict[str, Dict[str, float]] = {}
+    open_pos: Dict[str, Dict[str, Any]] = {}
     equity_points: List[Tuple[int, float]] = []
     realized_equity = 0.0
     peak_equity = 0.0
@@ -248,6 +275,7 @@ def compute_pnl(
         px = t["price"]
         ts = t["ts"]
         notional = t["notional_usd"]
+        reason = t.get("reason", "")
         
         if pair not in per_pair:
             per_pair[pair] = {
@@ -275,9 +303,10 @@ def compute_pnl(
                 open_pos[pair] = {
                     "vol": vol,
                     "entry_px": px,
-                    "entry_ts": float(ts),
+                    "entry_ts": ts,
                     "cost_usd": notional,
-                    "entry_fee": entry_fee
+                    "entry_fee": entry_fee,
+                    "entry_reason": reason,
                 }
                 per_pair[pair]["open_position"] = True
                 per_pair[pair]["open_volume"] = vol
@@ -290,6 +319,9 @@ def compute_pnl(
                 entry_px = open_pos[pair]["entry_px"]
                 entry_vol = open_pos[pair]["vol"]
                 entry_fee = open_pos[pair].get("entry_fee", 0.0)
+                entry_ts = open_pos[pair].get("entry_ts", 0)
+                entry_reason = open_pos[pair].get("entry_reason", "")
+                entry_notional = open_pos[pair].get("cost_usd", entry_px * entry_vol)
                 close_vol = min(entry_vol, vol) if vol > 0 else entry_vol
                 
                 # Calculate exit fee
@@ -300,6 +332,39 @@ def compute_pnl(
                 # Gross and net PnL
                 gross_pnl = (px - entry_px) * close_vol
                 net_pnl = gross_pnl - total_trade_fees
+                
+                # Percentage return (based on entry cost)
+                pnl_pct = (net_pnl / entry_notional * 100) if entry_notional > 0 else 0.0
+                
+                # ===== LOG CLOSED TRADE =====
+                trade_id = f"{entry_ts}_{ts}_{pair}"
+                if trade_id not in logged_close_ids:
+                    closed_trade = {
+                        "id": trade_id,
+                        "pair": pair,
+                        "symbol": _get_friendly_name(pair),
+                        "asset_type": "crypto" if _is_crypto_pair(pair) else "stock",
+                        "side": "LONG",
+                        "volume": close_vol,
+                        "entry_price": entry_px,
+                        "exit_price": px,
+                        "entry_ts": entry_ts,
+                        "exit_ts": ts,
+                        "entry_reason": entry_reason,
+                        "exit_reason": reason,
+                        "entry_notional": round(entry_notional, 2),
+                        "exit_notional": round(exit_notional, 2),
+                        "entry_fee": round(entry_fee, 4),
+                        "exit_fee": round(exit_fee, 4),
+                        "total_fees": round(total_trade_fees, 4),
+                        "gross_pnl": round(gross_pnl, 4),
+                        "net_pnl": round(net_pnl, 4),
+                        "pnl_pct": round(pnl_pct, 2),
+                        "is_win": net_pnl >= 0,
+                        "hold_duration_hours": round((ts - entry_ts) / 3600, 2) if entry_ts > 0 else 0,
+                    }
+                    _log_closed_trade(closed_trade)
+                    logged_close_ids.add(trade_id)
                 
                 per_pair[pair]["realized_pnl_usd"] += net_pnl
                 per_pair[pair]["fees_paid_usd"] += total_trade_fees
@@ -316,7 +381,7 @@ def compute_pnl(
                     portfolio["losses"] += 1
                 
                 # Clear position
-                open_pos[pair] = {"vol": 0.0, "entry_px": 0.0, "entry_ts": 0.0, "cost_usd": 0.0, "entry_fee": 0.0}
+                open_pos[pair] = {"vol": 0.0, "entry_px": 0.0, "entry_ts": 0, "cost_usd": 0.0, "entry_fee": 0.0, "entry_reason": ""}
                 per_pair[pair]["open_position"] = False
                 per_pair[pair]["open_volume"] = 0.0
                 per_pair[pair]["entry_price"] = 0.0
@@ -337,21 +402,15 @@ def compute_pnl(
         mark = marks.get(pair, 0.0)
         
         if vol > 0 and entry_px > 0:
-            # Update mark price in per_pair
             per_pair[pair]["mark_price"] = mark
             per_pair[pair]["open_position"] = True
             per_pair[pair]["open_volume"] = vol
             per_pair[pair]["entry_price"] = entry_px
             
             if mark > 0:
-                # Gross unrealized
                 gross_unrealized = (mark - entry_px) * vol
-                
-                # Estimate exit fee
                 exit_notional = mark * vol
                 estimated_exit_fee = _get_fee(pair, vol, mark, exit_notional, kraken_cfg, ibkr_cfg)
-                
-                # Net unrealized = gross - entry_fee - estimated_exit_fee
                 net_unrealized = gross_unrealized - entry_fee - estimated_exit_fee
                 
                 per_pair[pair]["unrealized_pnl_usd"] = net_unrealized
@@ -382,6 +441,26 @@ def compute_pnl(
         "pairs": per_pair,
         "equity_curve_realized": equity_points[-200:],
     }
+
+
+def get_closed_trades(limit: int = 50) -> list:
+    """Load closed trades from JSONL file"""
+    if not os.path.exists(CLOSED_TRADES_PATH):
+        return []
+    
+    trades = []
+    try:
+        with open(CLOSED_TRADES_PATH, "r") as f:
+            for line in f:
+                if line.strip():
+                    trades.append(json.loads(line))
+    except Exception as e:
+        print(f"Error reading closed trades: {e}")
+        return []
+    
+    # Sort by exit timestamp descending (most recent first)
+    trades.sort(key=lambda x: x.get("exit_ts", 0), reverse=True)
+    return trades[:limit]
 
 
 def write_pnl_json(cfg: Dict[str, Any], payload: Dict[str, Any]) -> None:
