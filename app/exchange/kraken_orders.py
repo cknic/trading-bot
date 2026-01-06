@@ -4,6 +4,7 @@ import time
 # Stores pair info (decimals, min_size) so we don't spam Kraken API
 _PAIR_INFO_CACHE = {}
 
+
 class OrderDecision:
     def __init__(self, should_place, side=None, volume=None, price=None, reason="", mode="dry_run"):
         self.should_place = should_place
@@ -12,6 +13,7 @@ class OrderDecision:
         self.price = price
         self.reason = reason
         self.mode = mode
+
 
 def resolve_pair_info(k, pair):
     """
@@ -50,15 +52,19 @@ def resolve_pair_info(k, pair):
         _PAIR_INFO_CACHE[key] = (key, normalized)
         
         return key, normalized
+
     except Exception as e:
         raise Exception(f"Failed to resolve pair {pair}: {e}")
+
 
 def get_price(k, pair_key):
     # Always fetch fresh price (never cache this!)
     t = k.public("Ticker", {"pair": pair_key})
-    if t.get("error"): raise Exception(str(t["error"]))
+    if t.get("error"):
+        raise Exception(str(t["error"]))
     # Ticker format: {"XXBTZUSD": {"c": ["price", "vol"], ...}}
     return float(t["result"][pair_key]["c"][0])
+
 
 def build_order(k, cfg, pair_key, side, base_volume_override=None):
     """
@@ -92,7 +98,19 @@ def build_order(k, cfg, pair_key, side, base_volume_override=None):
     mode = cfg["trading"]["mode"]
     return OrderDecision(True, side=side, volume=fmt_vol, price=price, reason=f"{mode} order planned", mode=mode), {"last": price}
 
+
 def place_or_preview(k, cfg, risk_engine, pair, side, base_volume_override=None):
+    """
+    Main entry point for order placement.
+    
+    Args:
+        k: Kraken API client
+        cfg: Trading configuration
+        risk_engine: RiskEngine instance
+        pair: Trading pair (e.g., "XBTUSD")
+        side: "buy" or "sell"
+        base_volume_override: For sells, the volume to sell
+    """
     # 1. Resolve pair
     pk, _ = resolve_pair_info(k, pair)
     
@@ -102,7 +120,9 @@ def place_or_preview(k, cfg, risk_engine, pair, side, base_volume_override=None)
     if not od.should_place:
         return od, metrics
 
-    # 3. Risk Check
+    # 3. Risk Check - Pass side so sells aren't blocked by position limits
+    print(f"[RISK] Checking: side={side}, volume={od.volume}, price={od.price}")
+    
     if not risk_engine.check(side, float(od.volume), od.price):
         od.should_place = False
         od.reason = "Risk check failed"
@@ -125,7 +145,6 @@ def place_or_preview(k, cfg, risk_engine, pair, side, base_volume_override=None)
             if resp.get("error"):
                 od.reason = f"Kraken Reject: {resp['error']}"
             else:
-                # txid = resp["result"]["txid"]
                 od.reason = "LIVE order placed"
         except Exception as e:
             od.reason = f"Execution Exception: {e}"

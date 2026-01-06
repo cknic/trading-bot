@@ -544,7 +544,7 @@ class StockBot:
         notional = quantity * price
         logger.info(f"EXECUTION REQUEST: {action} {quantity:.4f} {contract.symbol} @ ${price:.2f} (${notional:.2f})")
         
-        decision = self.risk.can_trade(notional, self.mode, contract.symbol)
+        decision = self.risk.can_trade(notional, self.mode, contract.symbol, side=action.lower())
         
         if not decision.allowed:
             logger.warning(f"RISK BLOCK: {decision.reason}")
@@ -570,7 +570,7 @@ class StockBot:
         
         # Record the trade
         final_notional = quantity * avg_price
-        append_trade(int(time.time()), contract.symbol, action.lower(), quantity, avg_price, final_notional, self.mode)
+        append_trade(int(time.time()), contract.symbol, action.lower(), quantity, avg_price, final_notional, self.mode, reason)
         
         if action == "BUY":
             set_position(contract.symbol, quantity, avg_price)

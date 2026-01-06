@@ -380,22 +380,28 @@ def get_dashboard_data(authorization: Optional[str] = Header(default=None)):
         vol = float(p.get("base_volume", 0.0))
         val = curr * vol
         cost = entry * vol
-        
+    
         pnl_pair_data = pnl_pairs.get(s, {})
-        
+    
         if pnl_pair_data and pnl_pair_data.get("open_position"):
             unrealized = pnl_pair_data.get("unrealized_pnl_usd", 0.0)
             pct = calc_pct(unrealized, cost)
+            # Get fees for this position
+            entry_fee = pnl_pair_data.get("entry_fee_usd", 0.0)
+            fees_paid = pnl_pair_data.get("fees_paid_usd", 0.0)
+            position_fees = entry_fee + fees_paid
         else:
             unrealized = (curr - entry) * vol
             pct = ((curr - entry) / entry) * 100 if entry > 0 else 0
-        
+            position_fees = 0.0
+    
         p['base_volume'] = round(vol, 4)
         p['average_price'] = round(entry, 4)
         p['current_value'] = round(val, 2)
         p['cost_basis'] = round(cost, 2)
         p['unrealized_usd'] = round(unrealized, 2)
         p['unrealized_pct'] = round(pct, 2)
+        p['fees_usd'] = round(position_fees, 4)
     
     raw_trades = _tail_file(TRADES_CSV, 50)
     trades = []

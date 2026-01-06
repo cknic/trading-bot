@@ -217,6 +217,7 @@
                     <th>AVG PRICE</th>
                     <th>OPENED</th>
                     <th>VALUE</th>
+                    <th>FEES</th>
                     <th>UNREALIZED</th>
                 </tr>
             </thead>
@@ -684,6 +685,7 @@
                     '<td class="py-2 font-mono text-slate-400">$' + parseFloat(pos.average_price || 0).toFixed(2) + '</td>' +
                     '<td class="py-2 text-xs text-slate-500">' + entryDate + '</td>' +
                     '<td class="py-2 font-mono text-white">$' + (pos.current_value || 0).toFixed(2) + '</td>' +
+                    '<td class="py-2 font-mono text-yellow-400">$' + (pos.fees_usd || 0).toFixed(4) + '</td>' +
                     '<td class="py-2 font-mono ' + pColor + '">$' + upnl.toFixed(2) + ' <span class="text-xs">(' + pctSign + pctVal.toFixed(2) + '%)</span></td>' +
                     '</tr>';
             }

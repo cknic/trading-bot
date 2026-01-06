@@ -215,8 +215,8 @@ def apply_daily_opex(kcfg):
         print(f"OpEx Update Error: {e}")
 
 
-def log_trade_csv(pair, side, vol, price, cost, mode):
-    append_trade(int(time.time()), pair, side, str(vol), str(price), cost, mode)
+def log_trade_csv(pair, side, vol, price, cost, mode, reason=""):
+    append_trade(int(time.time()), pair, side, str(vol), str(price), cost, mode, reason)
 
 
 def write_bot_status(status):
@@ -365,7 +365,7 @@ def reconcile_and_sync_positions(k, pairs):
 # ==============================================================================
 # 3. TRADE EXECUTION
 # ==============================================================================
-def execute_trade_logic(k, risk, kcfg, pair, side, amt=None, current_prices=None):
+def execute_trade_logic(k, risk, kcfg, pair, side, amt=None, current_prices=None, reason=""):
     kcfg_orders = safe_kcfg_for_orders(kcfg)
     pos = get_position(pair)
     base_override = pos.get("base_volume") if side == "sell" else None
@@ -390,7 +390,7 @@ def execute_trade_logic(k, risk, kcfg, pair, side, amt=None, current_prices=None
         print(f"  Mode:   {od.mode.upper()}")
         print(f"================================================")
         
-        log_trade_csv(pair, side, executed_vol, executed_price, total_cost, od.mode)
+        log_trade_csv(pair, side, executed_vol, executed_price, total_cost, od.mode, reason)
         
         if od.mode != "live" and od.reason == "dry-run":
             if side == "buy":
@@ -726,7 +726,7 @@ def main():
                 side = manual.get("side")
                 if pk and side in ("buy", "sell"):
                     print(f"\n>>> MANUAL ORDER: {side.upper()} {pk}")
-                    execute_trade_logic(k, risk, kcfg, pk, side, current_prices=current_prices)
+                    execute_trade_logic(k, risk, kcfg, pk, side, current_prices=current_prices, reason="Manual Order")
                 clear_manual_order()
             
             # B. Strategy Check
@@ -791,7 +791,7 @@ def main():
                             
                             if should_exit:
                                 print(f"  [{friendly_name}] 🛑 STOP-LOSS: {exit_reason}")
-                                execute_trade_logic(k, risk, kcfg, pk, "sell", current_prices=current_prices)
+                                execute_trade_logic(k, risk, kcfg, pk, "sell", current_prices=current_prices, reason=exit_reason)
                                 continue
                         
                         # ===== STRATEGY DECISION =====
@@ -843,10 +843,10 @@ def main():
                         # ===== EXECUTE =====
                         if final_action == "BUY":
                             print(f"  [{friendly_name}] ✅ BUYING: {final_reason}")
-                            execute_trade_logic(k, risk, kcfg, pk, "buy", current_prices=current_prices)
+                            execute_trade_logic(k, risk, kcfg, pk, "buy", current_prices=current_prices, reason=final_reason)
                         elif final_action == "SELL":
                             print(f"  [{friendly_name}] 🔴 SELLING: {final_reason}")
-                            execute_trade_logic(k, risk, kcfg, pk, "sell", current_prices=current_prices)
+                            execute_trade_logic(k, risk, kcfg, pk, "sell", current_prices=current_prices, reason=final_reason)
                         else:
                             print(f"  [{friendly_name}] ⏸ HOLD: {final_reason[:60]}...")
                         
