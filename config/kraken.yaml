@@ -9,10 +9,10 @@ kraken:
     - "XDGUSD"   # Dogecoin (Uncomment if you want higher risk)
 
 trading:
-  mode: "live"          # dry_run | live
+  mode: "dry_run"          # dry_run | live
   order_type: "limit"      # limit | market
-  quote_notional_usd: 15.0
-  poll_seconds: 300
+  quote_notional_usd: 20.0
+  poll_seconds: 60
 
 fees:
   taker_fee_pct: 0.26     # Standard Kraken Taker fee (0.26%)
@@ -24,7 +24,7 @@ safety:
   limit_offset_pct: 0.02
 
 strategy:
-  timeframe_minutes: 15
+  timeframe_minutes: 60
   sma_short: 10
   sma_long: 30
   min_candles: 60

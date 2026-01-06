@@ -36,7 +36,7 @@ services:
       - LIVE_LATCH_FILE=/run/trading/LIVE_LATCH
       - REQUIRE_LIVE_LATCH=1
     volumes:
-      - ./config:/config:ro
+      - ./config:/config:rw
       - ./data:/data
       - trading-run:/run/trading
     ports:

@@ -1,43 +1,38 @@
 ibkr:
   host: "ib-gateway"
-  port: 4002          # The code will override this to 4004 if the ENV var is set, but 4002 is a good fallback
+  port: 4002
   client_id: 1
-  account: ""         # Leave empty to auto-detect
+  account: ""
 
 trading:
   mode: "paper"
-  poll_seconds: 5     # IBKR is fast, so 5 seconds is good for responsiveness
+  poll_seconds: 300
+
+fees:
+  structure: "tiered"
+  per_share: 0.0035      # $0.0035 per share
+  minimum_usd: 0.35      # $0.35 minimum per order
+  maximum_pct: 1.0       # Max 1% of trade value
 
 risk:
-  max_position_usd: 5000
-  max_daily_loss: 200
+  max_position_usd: 50
+  max_daily_loss: 50
 
 universe:
   stocks:
-    # --- TECH / AI / SEMIS ---
-    - "NVDA"  # AI Leader
-    - "AMD"   # Semis Beta
-    - "INTC"  # Value Volatility
-    - "IONQ"  # Quantum AI Speculation
-    
-    # --- FINTECH / CRYPTO ---
-    - "SOFI"  # Retail Favorite
-    - "UPST"  # AI Lending Volatility
-    - "COIN"  # Crypto Proxy
-    
-    # --- FINANCIALS ---
-    - "BAC"   # Rate Sensitive
-    - "ARCC"  # Dividend Swing
-    
-    # --- ENERGY / INFRASTRUCTURE ---
-    - "ET"    # Pipeline Volatility
-    - "EPD"   # Midstream Stability
-    
-    # --- DEFENSIVE / VALUE ---
-    - "F"     # Auto Cyclical
-    - "PFE"   # Pharma Reversion
-    - "T"     # Telecom Yield
-    
-    # --- ETFs (Benchmarks) ---
+    - "NVDA"
+    - "AMD"
+    - "INTC"
+    - "IONQ"
+    - "SOFI"
+    - "UPST"
+    - "COIN"
+    - "BAC"
+    - "ARCC"
+    - "ET"
+    - "EPD"
+    - "F"
+    - "PFE"
+    - "T"
     - "QQQ"
     - "IWM"

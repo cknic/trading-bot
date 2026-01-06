@@ -1,0 +1,1074 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentinel Command Center</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Mono', monospace; }
+        .card { background-color: #1e293b; border: 1px solid #334155; border-radius: 0.5rem; padding: 1rem; }
+        .btn { padding: 0.5rem 1rem; border-radius: 0.25rem; font-weight: bold; cursor: pointer; transition: all 0.2s; }
+        .btn-blue { background-color: #3b82f6; color: white; }
+        .btn-blue:hover { background-color: #2563eb; }
+        .btn-red { background-color: #ef4444; color: white; }
+        .btn-red:hover { background-color: #dc2626; }
+        .btn-slate { background-color: #334155; color: white; }
+        .btn-slate:hover { background-color: #475569; }
+        .filter-btn { border: 1px solid #475569; color: #94a3b8; }
+        .filter-btn.active { background-color: #3b82f6; color: white; border-color: #3b82f6; }
+        .tf-btn { background-color: #1e293b; border: 1px solid #475569; color: #94a3b8; cursor: pointer; }
+        .tf-btn:hover { background-color: #334155; }
+        .tf-btn.active { background-color: #3b82f6; color: white; border-color: #3b82f6; }
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .dot-green { background-color: #10b981; box-shadow: 0 0 5px #10b981; }
+        .dot-red { background-color: #ef4444; box-shadow: 0 0 5px #ef4444; }
+        .dot-yellow { background-color: #f59e0b; box-shadow: 0 0 5px #f59e0b; }
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; border-bottom: 1px solid #334155; padding: 0.5rem; color: #94a3b8; font-size: 0.85rem; }
+        td { border-bottom: 1px solid #334155; padding: 0.5rem; font-size: 0.9rem; }
+        .log-error { border-left: 3px solid #ef4444; }
+        .log-warn { border-left: 3px solid #f59e0b; }
+        .log-info { border-left: 3px solid #3b82f6; }
+        
+        /* AI Brain Scrollable Container */
+        .ai-brain-container {
+            height: 500px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: #475569 #1e293b;
+        }
+        .ai-brain-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .ai-brain-container::-webkit-scrollbar-track {
+            background: #1e293b;
+            border-radius: 4px;
+        }
+        .ai-brain-container::-webkit-scrollbar-thumb {
+            background-color: #475569;
+            border-radius: 4px;
+        }
+        .ai-brain-container::-webkit-scrollbar-thumb:hover {
+            background-color: #64748b;
+        }
+        
+        /* AI Log Entry Styling */
+        .ai-log-entry {
+            transition: all 0.2s ease;
+        }
+        .ai-log-entry:hover {
+            background-color: #334155;
+        }
+        .ai-log-entry.verdict-go {
+            border-left-color: #10b981;
+        }
+        .ai-log-entry.verdict-stop {
+            border-left-color: #ef4444;
+        }
+        .ai-log-entry.verdict-neutral {
+            border-left-color: #f59e0b;
+        }
+        
+        /* Collapsible AI Response */
+        .ai-response-text {
+            max-height: 100px;
+            overflow: hidden;
+            transition: max-height 0.3s ease;
+        }
+        .ai-response-text.expanded {
+            max-height: none;
+        }
+        .expand-btn {
+            cursor: pointer;
+            color: #3b82f6;
+            font-size: 0.7rem;
+            margin-top: 4px;
+        }
+        .expand-btn:hover {
+            text-decoration: underline;
+        }
+        
+        /* Enhanced Indicator Pills */
+        .indicator-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .pill-bullish { background-color: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .pill-bearish { background-color: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+        .pill-neutral { background-color: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .pill-info { background-color: rgba(59, 130, 246, 0.2); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); }
+    </style>
+</head>
+<body class="p-6">
+    <!-- Header -->
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-3xl font-bold tracking-tight text-white">SENTINEL <span class="text-blue-500">AI</span></h1>
+            <p class="text-slate-400 text-sm">Multi-Asset Algorithmic Trading System</p>
+        </div>
+        <div class="flex items-center space-x-4">
+            <div id="auth-box" class="flex space-x-2">
+                <input id="token-input" type="password" placeholder="Admin Token" class="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-sm">
+                <button onclick="saveToken()" class="text-xs bg-slate-700 px-2 py-1 rounded">Save</button>
+            </div>
+            <div class="flex space-x-1 bg-slate-800 p-1 rounded-lg">
+                <button onclick="setFilter('all')" id="btn-all" class="filter-btn active btn text-sm">ALL</button>
+                <button onclick="setFilter('crypto')" id="btn-crypto" class="filter-btn btn text-sm">CRYPTO</button>
+                <button onclick="setFilter('stocks')" id="btn-stocks" class="filter-btn btn text-sm">STOCKS</button>
+            </div>
+        </div>
+    </div>
+    <!-- System Controls -->
+    <div class="card mb-6" id="controls-panel">
+        <h3 class="text-lg font-bold mb-4 flex justify-between">
+            <span>SYSTEM CONTROLS</span>
+            <span id="system-msg" class="text-yellow-500 text-sm font-mono"></span>
+        </h3>
+        <div class="flex space-x-3 flex-wrap">
+            <button onclick="apiCall('/control/pause', {reason:'UI'})" class="btn btn-blue text-sm">PAUSE ALL</button>
+            <button onclick="apiCall('/control/resume')" class="btn btn-blue text-sm">RESUME ALL</button>
+            <button onclick="apiCall('/control/restart')" class="btn btn-slate text-sm">RESTART CONTAINER</button>
+            <button onclick="apiCall('/control/kill', {reason:'UI'})" class="btn btn-red text-sm">KILL SWITCH</button>
+            <button onclick="if(confirm('RESET ALL DATA?')) apiCall('/control/factory_reset')" class="btn btn-red text-sm">FACTORY RESET</button>
+        </div>
+    </div>
+    <!-- Bot Status Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <div id="card-crypto" class="card" data-type="crypto">
+            <div class="flex justify-between mb-2">
+                <h2 class="text-lg font-bold"><span id="crypto-indicator" class="status-dot dot-red"></span> ZEUS (Crypto)</h2>
+                <span id="crypto-ts" class="text-xs text-slate-500">--</span>
+            </div>
+            <div class="text-sm font-mono text-slate-300">
+                Mode: <span id="crypto-mode" class="text-blue-400 font-bold">--</span> | Status: <span id="crypto-status">--</span>
+            </div>
+            <div class="text-sm font-mono mt-2 pt-2 border-t border-slate-700">
+                <span class="status-dot dot-green"></span>
+                <span class="text-green-400">24/7 Markets</span>
+            </div>
+        </div>
+        <div id="card-stocks" class="card" data-type="stocks">
+            <div class="flex justify-between mb-2">
+                <h2 class="text-lg font-bold"><span id="stocks-indicator" class="status-dot dot-red"></span> SENTINEL (Stocks)</h2>
+                <span id="stocks-ts" class="text-xs text-slate-500">--</span>
+            </div>
+            <div class="text-sm font-mono text-slate-300">
+                Mode: <span id="stocks-mode" class="text-blue-400 font-bold">--</span> | Scanning: <span id="stocks-count">--</span>
+            </div>
+            <div id="market-status-row" class="text-sm font-mono mt-2 pt-2 border-t border-slate-700">
+                <span id="market-indicator" class="status-dot dot-red"></span>
+                <span id="market-status-text" class="text-slate-400">Market Status: Loading...</span>
+                <span id="next-open-text" class="text-xs text-slate-500 ml-2"></span>
+            </div>
+        </div>
+    </div>
+    <!-- P&L Summary -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+        <div class="card">
+            <div class="flex justify-between items-center mb-1">
+                <h3 class="text-slate-400 text-sm font-bold">REALIZED P&L</h3>
+                <div class="flex space-x-1">
+                    <button onclick="setTimeframe('1d')" id="tf-1d" class="tf-btn text-xs px-2 py-1 rounded">1D</button>
+                    <button onclick="setTimeframe('1w')" id="tf-1w" class="tf-btn text-xs px-2 py-1 rounded">1W</button>
+                    <button onclick="setTimeframe('1m')" id="tf-1m" class="tf-btn text-xs px-2 py-1 rounded">1M</button>
+                    <button onclick="setTimeframe('all')" id="tf-all" class="tf-btn active text-xs px-2 py-1 rounded">ALL</button>
+                </div>
+            </div>
+            <p id="total-equity" class="text-3xl font-mono font-bold text-white">$0.00</p>
+            <p id="eq-label" class="text-xs text-slate-500 mt-2">Loading...</p>
+        </div>
+        <div class="card col-span-2">
+            <div id="equityChart" style="min-height: 150px;"></div>
+        </div>
+    </div>
+    <!-- Holdings Table -->
+    <div class="card mb-6">
+        <div class="flex justify-between items-center mb-4 border-b border-slate-700 pb-2">
+            <h3 class="text-lg font-bold">CURRENT HOLDINGS</h3>
+            <div id="holdings-summary" class="flex space-x-6 text-sm font-mono">
+                <div>
+                    <span class="text-slate-400">Cost Basis:</span>
+                    <span id="sum-cost" class="text-white font-bold ml-1">$0.00</span>
+                </div>
+                <div>
+                    <span class="text-slate-400">Unrealized P&L:</span>
+                    <span id="sum-unrealized" class="text-green-400 font-bold ml-1">$0.00</span>
+                    <span id="sum-pct" class="text-green-400 text-xs ml-1">(0.00%)</span>
+                </div>
+                <div>
+                    <span class="text-slate-400">Fees:</span>
+                    <span id="sum-fees" class="text-yellow-400 font-bold ml-1">$0.00</span>
+                </div>
+            </div>
+        </div>
+        <table class="w-full">
+            <thead>
+                <tr>
+                    <th>ASSET</th>
+                    <th>MODE</th>
+                    <th>SIZE</th>
+                    <th>AVG PRICE</th>
+                    <th>OPENED</th>
+                    <th>VALUE</th>
+                    <th>UNREALIZED</th>
+                </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+        </table>
+    </div>
+    <!-- Charts, AI Brain, Manual Trade -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+        <!-- Price Chart -->
+        <div class="card">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold">PRICE ACTION</h3>
+                <select id="chart-select" class="bg-slate-800 border border-slate-600 rounded text-sm p-1">
+                    <option value="">Select Pair...</option>
+                </select>
+            </div>
+            <div id="candleChart" style="min-height: 250px;"></div>
+        </div>
+        <!-- AI Brain Logs -->
+        <div class="card">
+            <div class="sticky top-0 bg-[#1e293b] py-2 z-10">
+                <div class="flex justify-between items-center mb-2">
+                    <h3 class="text-lg font-bold">AI BRAIN LOGS</h3>
+                    <div class="flex items-center space-x-2">
+                        <span id="ai-log-count" class="text-xs text-slate-500">0 entries</span>
+                        <button onclick="exportAILogsCSV()" class="text-xs bg-green-700 px-2 py-1 rounded hover:bg-green-600" title="Export to CSV">📥 CSV</button>
+                        <button onclick="scrollToLatestAI()" class="text-xs bg-slate-700 px-2 py-1 rounded hover:bg-slate-600">↑ Latest</button>
+                    </div>
+                </div>
+                <div class="flex flex-wrap gap-2 items-center">
+                    <input id="ai-search" type="text" placeholder="Search responses..." 
+                           class="bg-slate-900 border border-slate-600 rounded text-xs px-2 py-1 w-32"
+                           oninput="renderAILogs()">
+                    <select id="ai-verdict-filter" class="bg-slate-800 border border-slate-600 rounded text-xs p-1" onchange="renderAILogs()">
+                        <option value="all">All Verdicts</option>
+                        <option value="go">GO Only</option>
+                        <option value="stop">STOP Only</option>
+                    </select>
+                    <select id="ai-asset-filter" class="bg-slate-800 border border-slate-600 rounded text-xs p-1" onchange="renderAILogs()">
+                        <option value="all">All Assets</option>
+                    </select>
+                    <button onclick="clearAIFilters()" class="text-xs text-slate-400 hover:text-white">✕ Clear</button>
+                </div>
+            </div>
+            <div id="ai-logs" class="ai-brain-container space-y-3 text-sm font-mono"></div>
+        </div>
+        <!-- Manual Trade -->
+        <div class="card">
+            <h3 class="text-lg font-bold mb-4">MANUAL TRADE</h3>
+            <div class="space-y-3">
+                <select id="manual-pair" class="w-full bg-slate-800 border border-slate-600 rounded text-sm p-2">
+                    <option value="">Select Asset...</option>
+                </select>
+                <div class="flex space-x-2">
+                    <select id="manual-side" class="bg-slate-800 border border-slate-600 rounded text-sm p-2 flex-1">
+                        <option value="buy">BUY</option>
+                        <option value="sell">SELL</option>
+                    </select>
+                    <input id="manual-notional" type="number" value="20" placeholder="USD" class="bg-slate-800 border border-slate-600 rounded text-sm p-2 w-24" />
+                </div>
+                <button onclick="executeManual()" class="btn btn-blue w-full">EXECUTE TRADE</button>
+            </div>
+        </div>
+    </div>
+    <!-- Trade History & Prompt Editor -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <div class="card h-64 overflow-y-auto">
+            <h3 class="text-lg font-bold mb-4 sticky top-0 bg-[#1e293b]">TRADE HISTORY</h3>
+            <table class="w-full">
+                <thead><tr><th>TIME</th><th>PAIR</th><th>SIDE</th><th>PRICE</th></tr></thead>
+                <tbody id="trades-body"></tbody>
+            </table>
+        </div>
+        <div class="card">
+            <h3 class="text-lg font-bold mb-4 flex justify-between">
+                <span>AI PROMPT EDITOR</span>
+                <span id="prompt-target" class="text-xs text-blue-400 font-mono self-center"></span>
+            </h3>
+            <textarea id="prompt-text" class="w-full h-32 bg-slate-900 border border-slate-600 rounded p-2 text-xs font-mono mb-2" placeholder="Select a bot filter (Crypto/Stocks) above to edit its instructions..."></textarea>
+            <div class="flex justify-end space-x-2">
+                <button onclick="loadConfig()" class="btn btn-slate text-xs">RELOAD</button>
+                <button onclick="saveConfig()" id="btn-save-prompt" class="btn btn-blue text-xs">SAVE PROMPT</button>
+            </div>
+        </div>
+    </div>
+    <!-- System Logs -->
+    <div class="card">
+        <div class="flex justify-between items-center mb-4 border-b border-slate-700 pb-2">
+            <h3 class="text-lg font-bold">SYSTEM LOGS</h3>
+            <div class="flex space-x-2">
+                <select id="log-filter" class="bg-slate-800 border border-slate-600 rounded text-xs p-1" onchange="filterLogs()">
+                    <option value="all">All Levels</option>
+                    <option value="error">Errors Only</option>
+                    <option value="warn">Warnings</option>
+                    <option value="info">Info</option>
+                </select>
+                <select id="log-bot-filter" class="bg-slate-800 border border-slate-600 rounded text-xs p-1" onchange="filterLogs()">
+                    <option value="all">All Bots</option>
+                    <option value="crypto">Crypto</option>
+                    <option value="stocks">Stocks</option>
+                </select>
+                <button onclick="clearLogs()" class="btn btn-slate text-xs">CLEAR</button>
+            </div>
+        </div>
+        <div id="system-logs" class="h-48 overflow-y-auto space-y-1 text-xs font-mono"></div>
+    </div>
+    <script>
+        // =====================================================================
+        // STATE VARIABLES
+        // =====================================================================
+        let currentFilter = 'all';
+        let currentTimeframe = 'all';
+        let cachedPrompts = {};
+        let globalConfig = {};
+        let cachedTotals = {};
+        let allLogs = [];
+        let allAiLogs = [];
+        let selectedChartPair = '';
+        const TOKEN_KEY = "trading_admin_token";
+        const AI_LOG_LIMIT = 200;
+
+        // =====================================================================
+        // AUTH & API
+        // =====================================================================
+        document.getElementById('token-input').value = localStorage.getItem(TOKEN_KEY) || "";
+        function saveToken() {
+            localStorage.setItem(TOKEN_KEY, document.getElementById('token-input').value.trim());
+            alert("Saved");
+            fetchData();
+        }
+        function getAuthHeader() {
+            const t = localStorage.getItem(TOKEN_KEY);
+            return t ? { "Authorization": "Bearer " + t } : {};
+        }
+        async function apiCall(path, body = null) {
+            const opts = { method: 'POST', headers: { ...getAuthHeader(), 'Content-Type': 'application/json' } };
+            if (body) opts.body = JSON.stringify(body);
+            try {
+                await fetch(path, opts);
+                fetchData();
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // =====================================================================
+        // FILTER & TIMEFRAME
+        // =====================================================================
+        function setFilter(type) {
+            currentFilter = type;
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-' + type).classList.add('active');
+            document.getElementById('card-crypto').style.display = (type === 'all' || type === 'crypto') ? 'block' : 'none';
+            document.getElementById('card-stocks').style.display = (type === 'all' || type === 'stocks') ? 'block' : 'none';
+            updateEditorState();
+            updateDropdown(globalConfig);
+            updateSummary();
+            renderAILogs();
+            fetchData();
+        }
+        function setTimeframe(tf) {
+            currentTimeframe = tf;
+            document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('tf-' + tf).classList.add('active');
+            fetchData();
+        }
+
+        // =====================================================================
+        // MANUAL TRADE
+        // =====================================================================
+        async function executeManual() {
+            const pair = document.getElementById("manual-pair").value;
+            const side = document.getElementById("manual-side").value;
+            const notional = parseFloat(document.getElementById("manual-notional").value);
+            if (!pair || !side || isNaN(notional)) {
+                alert("Please fill all fields");
+                return;
+            }
+            await apiCall("/manual/execute", { pair: pair, side: side, notional_usd: notional });
+            alert("Manual trade queued for: " + pair);
+        }
+
+        // =====================================================================
+        // SYSTEM LOGS
+        // =====================================================================
+        async function clearLogs() {
+            await apiCall("/api/errors/clear");
+            allLogs = [];
+            renderLogs();
+        }
+        function filterLogs() {
+            renderLogs();
+        }
+        function renderLogs() {
+            const container = document.getElementById('system-logs');
+            const levelFilter = document.getElementById('log-filter').value;
+            const botFilter = document.getElementById('log-bot-filter').value;
+            container.innerHTML = '';
+            if (!allLogs || allLogs.length === 0) {
+                container.innerHTML = '<div class="text-slate-500 text-center py-4">No system logs</div>';
+                return;
+            }
+            allLogs.forEach(log => {
+                const level = (log.level || 'info').toLowerCase();
+                const bot = (log.bot || 'unknown').toLowerCase();
+                if (levelFilter !== 'all' && level !== levelFilter) return;
+                if (botFilter !== 'all' && bot !== botFilter) return;
+                let borderClass = 'log-info';
+                let levelColor = 'text-blue-400';
+                if (level === 'error') {
+                    borderClass = 'log-error';
+                    levelColor = 'text-red-400';
+                } else if (level === 'warn' || level === 'warning') {
+                    borderClass = 'log-warn';
+                    levelColor = 'text-yellow-400';
+                }
+                const ts = log.ts ? new Date(log.ts * 1000).toLocaleTimeString() : '--';
+                const botLabel = bot === 'crypto' ? 'ZEUS' : (bot === 'stocks' ? 'SENTINEL' : bot.toUpperCase());
+                container.innerHTML +=
+                    '<div class="bg-slate-800 p-2 rounded ' + borderClass + ' pl-3">' +
+                    '<div class="flex justify-between mb-1">' +
+                    '<span class="text-slate-500">' + ts + '</span>' +
+                    '<span class="' + levelColor + ' font-bold">[' + level.toUpperCase() + ']</span>' +
+                    '<span class="text-slate-400">' + botLabel + '</span>' +
+                    '</div>' +
+                    '<div class="text-slate-300 whitespace-pre-wrap">' + (log.message || '') + '</div>' +
+                    '</div>';
+            });
+        }
+
+        // =====================================================================
+        // CHARTS
+        // =====================================================================
+        const commonOpts = {
+            chart: { height: 250, toolbar: { show: false }, background: 'transparent' },
+            theme: { mode: 'dark' },
+            stroke: { curve: 'straight', width: 2 },
+            grid: { borderColor: '#334155' },
+            dataLabels: { enabled: false },
+            xaxis: { type: 'datetime' }
+        };
+        const eqChart = new ApexCharts(document.querySelector("#equityChart"), {
+            ...commonOpts,
+            chart: { ...commonOpts.chart, type: 'area' },
+            colors: ['#3b82f6'],
+            yaxis: {
+                labels: {
+                    formatter: function (val) {
+                        return '$' + val.toFixed(2);
+                    }
+                }
+            },
+            series: []
+        });
+        eqChart.render();
+        const candleChart = new ApexCharts(document.querySelector("#candleChart"), {
+            ...commonOpts,
+            chart: {
+                ...commonOpts.chart,
+                type: 'candlestick',
+                zoom: { enabled: true },
+                events: {
+                    zoomed: function (chartContext, { xaxis, yaxis }) {
+                        const sel = document.getElementById("chart-select");
+                        if (selectedChartPair && sel.value !== selectedChartPair) {
+                            sel.value = selectedChartPair;
+                        }
+                    }
+                }
+            },
+            plotOptions: { candlestick: { colors: { upward: '#10b981', downward: '#ef4444' } } },
+            yaxis: {
+                labels: {
+                    formatter: function (val) {
+                        return '$' + val.toFixed(2);
+                    }
+                }
+            },
+            series: []
+        });
+        candleChart.render();
+        document.getElementById("chart-select").addEventListener("change", function () {
+            selectedChartPair = this.value;
+            loadCandles();
+        });
+
+        // =====================================================================
+        // SUMMARY CALCULATIONS
+        // =====================================================================
+        function updateSummary() {
+            let cost = 0, unrealized = 0, fees = 0, pct = 0;
+            if (currentFilter === 'all') {
+                cost = cachedTotals.total_cost_basis || 0;
+                unrealized = cachedTotals.total_unrealized || 0;
+                fees = cachedTotals.total_fees || 0;
+                pct = cachedTotals.total_pct || 0;
+            } else if (currentFilter === 'crypto') {
+                cost = cachedTotals.crypto_cost_basis || 0;
+                unrealized = cachedTotals.crypto_unrealized || 0;
+                fees = cachedTotals.crypto_fees || 0;
+                pct = cachedTotals.crypto_pct || 0;
+            } else {
+                cost = cachedTotals.stocks_cost_basis || 0;
+                unrealized = cachedTotals.stocks_unrealized || 0;
+                fees = cachedTotals.stocks_fees || 0;
+                pct = cachedTotals.stocks_pct || 0;
+            }
+            document.getElementById('sum-cost').innerText = '$' + cost.toFixed(2);
+            const unrealizedEl = document.getElementById('sum-unrealized');
+            unrealizedEl.innerText = '$' + unrealized.toFixed(2);
+            unrealizedEl.className = unrealized >= 0 ? 'text-green-400 font-bold ml-1' : 'text-red-400 font-bold ml-1';
+            const pctEl = document.getElementById('sum-pct');
+            const pctSign = pct >= 0 ? '+' : '';
+            pctEl.innerText = '(' + pctSign + pct.toFixed(2) + '%)';
+            pctEl.className = pct >= 0 ? 'text-green-400 text-xs ml-1' : 'text-red-400 text-xs ml-1';
+            document.getElementById('sum-fees').innerText = '$' + fees.toFixed(2);
+        }
+
+        // =====================================================================
+        // MAIN DATA FETCH
+        // =====================================================================
+        async function fetchData() {
+            try {
+                const res = await fetch('/api/data', { headers: getAuthHeader() });
+                if (res.status === 401) {
+                    document.getElementById('system-msg').innerText = "AUTH REQUIRED";
+                    return;
+                }
+                const data = await res.json();
+                document.getElementById('system-msg').innerText = "";
+                if (data.prompts) cachedPrompts = data.prompts;
+                if (data.totals) {
+                    cachedTotals = data.totals;
+                    updateSummary();
+                }
+                if (data.global_config) {
+                    globalConfig = data.global_config;
+                    updateDropdown(globalConfig);
+                }
+                updateStatus(data);
+                updatePositions(data.positions);
+                updateTrades(data.trades);
+                if (data.ai_logs) {
+                    allAiLogs = data.ai_logs;
+                    renderAILogs();
+                }
+                const eqRes = await fetch('/api/equity?filter=' + currentFilter + '&timeframe=' + currentTimeframe, { headers: getAuthHeader() });
+                const eqData = await eqRes.json();
+                if (eqData.curve && eqData.curve.length > 0) {
+                    eqChart.updateSeries([{ name: "Realized P&L", data: eqData.curve.map(d => ({ x: d[0] * 1000, y: d[1] })) }]);
+                }
+                document.getElementById('eq-label').innerText = eqData.label || "Realized P&L";
+                const finalVal = eqData.net_pnl !== undefined ? eqData.net_pnl : 0;
+                const color = finalVal >= 0 ? "text-green-400" : "text-red-400";
+                document.getElementById('total-equity').innerHTML = '<span class="' + color + '">$' + finalVal.toFixed(2) + '</span>';
+                const errRes = await fetch('/api/errors?limit=100', { headers: getAuthHeader() });
+                const errData = await errRes.json();
+                if (errData.errors) {
+                    allLogs = errData.errors;
+                    renderLogs();
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // =====================================================================
+        // DROPDOWN UPDATES
+        // =====================================================================
+        function updateDropdown(cfg) {
+            if (!cfg || !cfg.kraken_pairs) return;
+            const sel = document.getElementById("chart-select");
+            const sel2 = document.getElementById("manual-pair");
+            const currentChartVal = selectedChartPair || sel.value;
+            sel.innerHTML = '<option value="">Select Pair...</option>';
+            sel2.innerHTML = '<option value="">Select Asset...</option>';
+            let list = [];
+            if (currentFilter === 'all' || currentFilter === 'crypto') {
+                list = list.concat(cfg.kraken_pairs || []);
+            }
+            if (currentFilter === 'all' || currentFilter === 'stocks') {
+                list = list.concat(cfg.ibkr_stocks || []);
+            }
+            list.forEach(p => {
+                const friendly = (cfg.friendly_map && cfg.friendly_map[p]) ? cfg.friendly_map[p] : p;
+                const opt = document.createElement("option");
+                opt.value = p;
+                opt.text = friendly + " (" + p + ")";
+                sel.appendChild(opt);
+                const opt2 = document.createElement("option");
+                opt2.value = p;
+                opt2.text = friendly + " (" + p + ")";
+                sel2.appendChild(opt2);
+            });
+            if (currentChartVal && list.includes(currentChartVal)) {
+                sel.value = currentChartVal;
+                selectedChartPair = currentChartVal;
+            }
+        }
+
+        // =====================================================================
+        // STATUS UPDATES
+        // =====================================================================
+        function updateStatus(data) {
+            const sc = data.status_crypto || {};
+            const dColor = sc.display_color || 'red';
+            document.getElementById('crypto-indicator').className = 'status-dot dot-' + dColor;
+            document.getElementById('crypto-mode').innerText = (sc.display_status || 'UNKNOWN');
+            document.getElementById('crypto-status').innerText = sc.killed ? "KILLED" : (sc.paused ? "PAUSED" : "ACTIVE");
+            const ss = data.status_stocks || {};
+            const sMode = (ss.mode_config || 'PAPER').toUpperCase();
+            document.getElementById('stocks-indicator').className = 'status-dot ' + (ss.paused ? 'dot-yellow' : 'dot-green');
+            document.getElementById('stocks-mode').innerText = sMode;
+            document.getElementById('stocks-count').innerText = ss.tickers || 0;
+            const mh = data.market_hours || {};
+            const marketOpen = mh.stocks_open;
+            const marketStatus = mh.status || 'Unknown';
+            const nextOpen = mh.next_open;
+            const marketIndicator = document.getElementById('market-indicator');
+            const marketStatusText = document.getElementById('market-status-text');
+            const nextOpenText = document.getElementById('next-open-text');
+            if (marketIndicator && marketStatusText) {
+                if (marketOpen) {
+                    marketIndicator.className = 'status-dot dot-green';
+                    marketStatusText.innerHTML = '<span class="text-green-400">' + marketStatus + '</span>';
+                    if (nextOpenText) nextOpenText.innerText = '';
+                } else {
+                    marketIndicator.className = 'status-dot dot-red';
+                    marketStatusText.innerHTML = '<span class="text-red-400">' + marketStatus + '</span>';
+                    if (nextOpenText && nextOpen) {
+                        nextOpenText.innerText = '→ ' + nextOpen;
+                    }
+                }
+            }
+        }
+
+        // =====================================================================
+        // POSITIONS TABLE
+        // =====================================================================
+        function updatePositions(positions) {
+            const tbody = document.getElementById('positions-body');
+            tbody.innerHTML = '';
+            if (!positions) return;
+            for (const [sym, pos] of Object.entries(positions)) {
+                const type = (pos.asset_type || '').toLowerCase();
+                if (currentFilter !== 'all') {
+                    if (currentFilter === 'stocks' && type !== 'stocks') continue;
+                    if (currentFilter === 'crypto' && type !== 'crypto') continue;
+                }
+                const upnl = pos.unrealized_usd || 0;
+                const pctVal = pos.unrealized_pct || 0;
+                const pColor = upnl >= 0 ? "text-green-400" : "text-red-400";
+                const pctSign = pctVal >= 0 ? '+' : '';
+                const modeStr = (pos.mode || 'UNK').toUpperCase();
+                const modeClass = modeStr.includes("LIVE") && !modeStr.includes("LATCH") ? "text-red-500 font-bold" : "text-slate-400";
+                let entryDate = '--';
+                const entryTs = pos.first_entry_time || pos.entry_ts || pos.last_entry_time || 0;
+                if (entryTs > 0) {
+                    entryDate = new Date(entryTs * 1000).toLocaleDateString();
+                }
+                tbody.innerHTML += '<tr class="border-b border-slate-700">' +
+                    '<td class="py-2 font-bold text-white">' + (pos.friendly_name || sym) + '</td>' +
+                    '<td class="py-2 text-xs ' + modeClass + '">' + modeStr + '</td>' +
+                    '<td class="py-2 font-mono">' + parseFloat(pos.base_volume || 0).toFixed(4) + '</td>' +
+                    '<td class="py-2 font-mono text-slate-400">$' + parseFloat(pos.average_price || 0).toFixed(2) + '</td>' +
+                    '<td class="py-2 text-xs text-slate-500">' + entryDate + '</td>' +
+                    '<td class="py-2 font-mono text-white">$' + (pos.current_value || 0).toFixed(2) + '</td>' +
+                    '<td class="py-2 font-mono ' + pColor + '">$' + upnl.toFixed(2) + ' <span class="text-xs">(' + pctSign + pctVal.toFixed(2) + '%)</span></td>' +
+                    '</tr>';
+            }
+        }
+
+        // =====================================================================
+        // TRADES TABLE
+        // =====================================================================
+        function updateTrades(trades) {
+            const tbody = document.getElementById('trades-body');
+            tbody.innerHTML = '';
+            if (!trades) return;
+            trades.slice().reverse().forEach(t => {
+                const type = (t.asset_type || '').toLowerCase();
+                if (currentFilter !== 'all') {
+                    if (currentFilter === 'stocks' && type !== 'stocks') return;
+                    if (currentFilter === 'crypto' && type !== 'crypto') return;
+                }
+                const color = t.side === 'buy' ? 'text-green-400' : 'text-red-400';
+                const ts = t.ts ? new Date(t.ts * 1000).toLocaleString() : '--';
+                tbody.innerHTML += '<tr class="border-b border-slate-800 text-xs">' +
+                    '<td class="py-1 text-slate-400">' + ts + '</td>' +
+                    '<td class="py-1 font-bold">' + (t.friendly_name || t.pair) + '</td>' +
+                    '<td class="py-1 ' + color + ' font-bold uppercase">' + (t.side || '') + '</td>' +
+                    '<td class="py-1 font-mono">$' + parseFloat(t.price || 0).toFixed(2) + '</td>' +
+                    '</tr>';
+            });
+        }
+
+        // =====================================================================
+        // AI LOG SEARCH, FILTER & EXPORT
+        // =====================================================================
+        function clearAIFilters() {
+            document.getElementById('ai-search').value = '';
+            document.getElementById('ai-verdict-filter').value = 'all';
+            document.getElementById('ai-asset-filter').value = 'all';
+            renderAILogs();
+        }
+
+        function updateAIAssetDropdown() {
+            const select = document.getElementById('ai-asset-filter');
+            const currentVal = select.value;
+            const assets = new Set();
+            
+            allAiLogs.forEach(log => {
+                if (log.asset) {
+                    // Extract base asset name (e.g., "BTC" from "BTC (Crypto)")
+                    const base = log.asset.split(' ')[0];
+                    assets.add(base);
+                }
+            });
+            
+            select.innerHTML = '<option value="all">All Assets</option>';
+            Array.from(assets).sort().forEach(asset => {
+                const opt = document.createElement('option');
+                opt.value = asset;
+                opt.text = asset;
+                select.appendChild(opt);
+            });
+            
+            // Restore selection if still valid
+            if (currentVal && assets.has(currentVal)) {
+                select.value = currentVal;
+            }
+        }
+
+        function getFilteredAILogs() {
+            const searchTerm = (document.getElementById('ai-search').value || '').toLowerCase();
+            const verdictFilter = document.getElementById('ai-verdict-filter').value;
+            const assetFilter = document.getElementById('ai-asset-filter').value;
+            
+            let filtered = allAiLogs;
+            
+            // Apply bot type filter (crypto/stocks from header)
+            if (currentFilter !== 'all') {
+                filtered = filtered.filter(log => {
+                    const asset = (log.asset || '').toLowerCase();
+                    const assetType = (log.asset_type || log.type || '').toLowerCase();
+                    if (currentFilter === 'crypto') {
+                        return assetType === 'crypto' ||
+                               ['btc', 'eth', 'sol', 'xrp', 'ada', 'doge'].some(c => asset.includes(c));
+                    } else if (currentFilter === 'stocks') {
+                        return assetType === 'stock' || assetType === 'stocks';
+                    }
+                    return true;
+                });
+            }
+            
+            // Apply verdict filter
+            if (verdictFilter !== 'all') {
+                filtered = filtered.filter(log => {
+                    const resp = (log.response || '').toUpperCase();
+                    if (verdictFilter === 'go') {
+                        return resp.includes('VERDICT: GO') || resp.includes('VERDICT:GO');
+                    } else if (verdictFilter === 'stop') {
+                        return resp.includes('VERDICT: STOP') || resp.includes('VERDICT:STOP');
+                    }
+                    return true;
+                });
+            }
+            
+            // Apply asset filter
+            if (assetFilter !== 'all') {
+                filtered = filtered.filter(log => {
+                    const asset = (log.asset || '').split(' ')[0];
+                    return asset === assetFilter;
+                });
+            }
+            
+            // Apply search term
+            if (searchTerm) {
+                filtered = filtered.filter(log => {
+                    const resp = (log.response || '').toLowerCase();
+                    const asset = (log.asset || '').toLowerCase();
+                    return resp.includes(searchTerm) || asset.includes(searchTerm);
+                });
+            }
+            
+            return filtered;
+        }
+
+        function exportAILogsCSV() {
+            const filtered = getFilteredAILogs();
+            if (filtered.length === 0) {
+                alert('No logs to export');
+                return;
+            }
+            
+            // CSV headers
+            const headers = [
+                'Timestamp', 'Asset', 'Verdict', 'Price', 'RSI', 'Trend', 
+                'Trend_Strength_%', 'Volatility_%', 'SMA_Distance_%', 
+                'RSI_Overbought', 'RSI_Oversold', 'Response'
+            ];
+            
+            const rows = filtered.map(log => {
+                const ind = log.indicators || {};
+                const resp = (log.response || '').toUpperCase();
+                let verdict = 'HOLD';
+                if (resp.includes('VERDICT: GO') || resp.includes('VERDICT:GO')) verdict = 'GO';
+                else if (resp.includes('VERDICT: STOP') || resp.includes('VERDICT:STOP')) verdict = 'STOP';
+                
+                return [
+                    log.ts ? new Date(log.ts * 1000).toISOString() : '',
+                    log.asset || '',
+                    verdict,
+                    ind.price !== undefined ? ind.price : '',
+                    ind.rsi !== undefined ? ind.rsi.toFixed(1) : '',
+                    ind.trend || '',
+                    ind.trend_strength_pct !== undefined ? ind.trend_strength_pct.toFixed(2) : '',
+                    ind.volatility_pct !== undefined ? ind.volatility_pct.toFixed(2) : '',
+                    ind.distance_from_sma_pct !== undefined ? ind.distance_from_sma_pct.toFixed(2) : '',
+                    ind.rsi_overbought ? 'Yes' : 'No',
+                    ind.rsi_oversold ? 'Yes' : 'No',
+                    '"' + (log.response || '').replace(/"/g, '""').replace(/\n/g, ' ') + '"'
+                ];
+            });
+            
+            const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+            
+            // Download
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'ai_logs_' + new Date().toISOString().split('T')[0] + '.csv';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // =====================================================================
+        // AI BRAIN LOGS - ENHANCED WITH FULL INDICATORS
+        // =====================================================================
+        function scrollToLatestAI() {
+            const container = document.getElementById('ai-logs');
+            container.scrollTop = 0;
+        }
+        function toggleAIExpand(id) {
+            const el = document.getElementById('ai-resp-' + id);
+            const btn = document.getElementById('ai-btn-' + id);
+            if (el.classList.contains('expanded')) {
+                el.classList.remove('expanded');
+                btn.innerText = '▼ Show More';
+            } else {
+                el.classList.add('expanded');
+                btn.innerText = '▲ Show Less';
+            }
+        }
+        function renderAILogs() {
+            const container = document.getElementById('ai-logs');
+            const countEl = document.getElementById('ai-log-count');
+            container.innerHTML = '';
+            
+            // Update asset dropdown options
+            updateAIAssetDropdown();
+            
+            if (!allAiLogs || allAiLogs.length === 0) {
+                container.innerHTML = '<div class="text-slate-500 text-center py-4">No AI decisions yet</div>';
+                countEl.innerText = '0 entries';
+                return;
+            }
+            
+            // Use centralized filter function
+            const filteredLogs = getFilteredAILogs();
+            
+            if (filteredLogs.length === 0) {
+                container.innerHTML = '<div class="text-slate-500 text-center py-4">No matches for current filters</div>';
+                countEl.innerText = '0 of ' + allAiLogs.length + ' entries';
+                return;
+            }
+            
+            countEl.innerText = filteredLogs.length + (filteredLogs.length !== allAiLogs.length ? ' of ' + allAiLogs.length : '') + ' entries';
+            
+            // Render in reverse order (newest first)
+            filteredLogs.slice().reverse().forEach((log, idx) => {
+                const resp = log.response || '';
+                const indicators = log.indicators || {};
+                // Determine verdict
+                let verdictClass = 'verdict-neutral';
+                let verdictText = 'HOLD';
+                let verdictColor = 'text-yellow-400';
+                let verdictBg = 'bg-yellow-500/20';
+                const respUpper = resp.toUpperCase();
+                if (respUpper.includes('VERDICT: GO') || respUpper.includes('VERDICT:GO')) {
+                    verdictClass = 'verdict-go';
+                    verdictText = 'GO';
+                    verdictColor = 'text-green-400';
+                    verdictBg = 'bg-green-500/20';
+                } else if (respUpper.includes('VERDICT: STOP') || respUpper.includes('VERDICT:STOP')) {
+                    verdictClass = 'verdict-stop';
+                    verdictText = 'STOP';
+                    verdictColor = 'text-red-400';
+                    verdictBg = 'bg-red-500/20';
+                }
+                const ts = log.ts ? new Date(log.ts * 1000).toLocaleString() : '--';
+                const asset = log.asset || 'Unknown';
+                // Build comprehensive indicator pills
+                let indicatorHtml = '';
+                let alertHtml = '';
+                if (Object.keys(indicators).length > 0) {
+                    // Price
+                    if (indicators.price !== undefined) {
+                        const priceStr = indicators.price >= 1000 
+                            ? '$' + indicators.price.toLocaleString(undefined, {minimumFractionDigits: 0, maximumFractionDigits: 0})
+                            : '$' + indicators.price.toFixed(4);
+                        indicatorHtml += '<span class="indicator-pill pill-info">' + priceStr + '</span>';
+                    }
+                    // RSI with color coding
+                    if (indicators.rsi !== undefined) {
+                        let rsiClass = 'pill-neutral';
+                        if (indicators.rsi >= 70) rsiClass = 'pill-bearish';
+                        else if (indicators.rsi <= 30) rsiClass = 'pill-bullish';
+                        indicatorHtml += '<span class="indicator-pill ' + rsiClass + '">RSI ' + indicators.rsi.toFixed(1) + '</span>';
+                    }
+                    // Trend with strength
+                    if (indicators.trend) {
+                        const trendClass = indicators.trend === 'bullish' ? 'pill-bullish' : 'pill-bearish';
+                        const trendIcon = indicators.trend === 'bullish' ? '↑' : '↓';
+                        let trendLabel = trendIcon + ' ' + indicators.trend.toUpperCase();
+                        if (indicators.trend_strength_pct !== undefined) {
+                            const sign = indicators.trend_strength_pct >= 0 ? '+' : '';
+                            trendLabel += ' (' + sign + indicators.trend_strength_pct.toFixed(2) + '%)';
+                        }
+                        indicatorHtml += '<span class="indicator-pill ' + trendClass + '">' + trendLabel + '</span>';
+                    }
+                    // Distance from SMA
+                    if (indicators.distance_from_sma_pct !== undefined) {
+                        const dist = indicators.distance_from_sma_pct;
+                        let distClass = 'pill-info';
+                        if (Math.abs(dist) > 5) distClass = 'pill-bearish';
+                        else if (Math.abs(dist) > 2) distClass = 'pill-neutral';
+                        const sign = dist >= 0 ? '+' : '';
+                        indicatorHtml += '<span class="indicator-pill ' + distClass + '">SMA ' + sign + dist.toFixed(2) + '%</span>';
+                    }
+                    // Volatility
+                    if (indicators.volatility_pct !== undefined) {
+                        let volClass = 'pill-info';
+                        if (indicators.volatility_pct > 3) volClass = 'pill-bearish';
+                        else if (indicators.volatility_pct > 1) volClass = 'pill-neutral';
+                        indicatorHtml += '<span class="indicator-pill ' + volClass + '">Vol ' + indicators.volatility_pct.toFixed(2) + '%</span>';
+                    }
+                    // Alert badges
+                    if (indicators.rsi_overbought) {
+                        alertHtml += '<span class="indicator-pill pill-bearish" title="RSI > 70">🔥 OVERBOUGHT</span>';
+                    }
+                    if (indicators.rsi_oversold) {
+                        alertHtml += '<span class="indicator-pill pill-bullish" title="RSI < 30">❄️ OVERSOLD</span>';
+                    }
+                    if (indicators.price_extended) {
+                        alertHtml += '<span class="indicator-pill pill-neutral" title="Price far from SMA">⚡ EXTENDED</span>';
+                    }
+                    if (indicators.bullish_cross) {
+                        alertHtml += '<span class="indicator-pill pill-bullish" title="SMA Bullish Cross">📈 CROSS</span>';
+                    }
+                    if (indicators.bearish_cross) {
+                        alertHtml += '<span class="indicator-pill pill-bearish" title="SMA Bearish Cross">📉 CROSS</span>';
+                    }
+                }
+                const needsExpand = resp.length > 250;
+                const uniqueId = 'ai-' + idx + '-' + (log.ts || 0);
+                container.innerHTML +=
+                    '<div class="ai-log-entry bg-slate-800 p-3 rounded border-l-4 ' + verdictClass + '">' +
+                        '<div class="flex justify-between items-start mb-2">' +
+                            '<div class="flex items-center gap-2">' +
+                                '<span class="text-blue-400 font-bold text-sm">' + asset + '</span>' +
+                                '<span class="' + verdictColor + ' ' + verdictBg + ' px-2 py-0.5 rounded text-xs font-bold">' + verdictText + '</span>' +
+                            '</div>' +
+                            '<span class="text-slate-500 text-xs">' + ts + '</span>' +
+                        '</div>' +
+                        (indicatorHtml ? '<div class="flex flex-wrap gap-1 mb-2">' + indicatorHtml + '</div>' : '') +
+                        (alertHtml ? '<div class="flex flex-wrap gap-1 mb-2">' + alertHtml + '</div>' : '') +
+                        '<div id="ai-resp-' + uniqueId + '" class="ai-response-text text-xs text-slate-300 whitespace-pre-wrap leading-relaxed">' +
+                            escapeHtml(resp) +
+                        '</div>' +
+                        (needsExpand ? '<div id="ai-btn-' + uniqueId + '" class="expand-btn" onclick="toggleAIExpand(\'' + uniqueId + '\')">▼ Show More</div>' : '') +
+                    '</div>';
+            });
+        }
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // =====================================================================
+        // PROMPT EDITOR
+        // =====================================================================
+        function updateEditorState() {
+            const txt = document.getElementById('prompt-text');
+            const target = document.getElementById('prompt-target');
+            const btn = document.getElementById('btn-save-prompt');
+            if (currentFilter === 'all') {
+                txt.value = "";
+                txt.disabled = true;
+                txt.placeholder = "<< SELECT A BOT (CRYPTO OR STOCKS) ABOVE TO EDIT INSTRUCTIONS >>";
+                target.innerText = "DISABLED";
+                btn.disabled = true;
+                btn.classList.add('opacity-50');
+            } else if (currentFilter === 'crypto') {
+                txt.disabled = false;
+                txt.value = cachedPrompts.strategy_decision || "";
+                target.innerText = "EDITING: ZEUS (Crypto)";
+                btn.disabled = false;
+                btn.classList.remove('opacity-50');
+            } else {
+                txt.disabled = false;
+                txt.value = cachedPrompts.stock_swing_decision || "";
+                target.innerText = "EDITING: SENTINEL (Stocks)";
+                btn.disabled = false;
+                btn.classList.remove('opacity-50');
+            }
+        }
+        async function saveConfig() {
+            let key = currentFilter === 'crypto' ? 'strategy_decision' : 'stock_swing_decision';
+            await apiCall('/config/ai', { new_prompt: document.getElementById('prompt-text').value, target_key: key });
+            alert("Instructions Updated");
+        }
+        async function loadCandles() {
+            const p = selectedChartPair || document.getElementById("chart-select").value;
+            if (!p) return;
+            const res = await fetch('/candles?pair=' + p, { headers: getAuthHeader() });
+            const d = await res.json();
+            if (d.data && d.data.length > 0) {
+                candleChart.updateSeries([{ data: d.data }]);
+            }
+        }
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/data', { headers: getAuthHeader() });
+                const d = await res.json();
+                if (d.prompts) {
+                    cachedPrompts = d.prompts;
+                    updateEditorState();
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        // =====================================================================
+        // INIT
+        // =====================================================================
+        setInterval(fetchData, 2000);
+        loadConfig();
+        fetchData();
+    </script>
+</body>
+</html>

@@ -1,0 +1,865 @@
+import os
+import json
+import csv
+import time
+import yaml
+import re
+import requests
+from typing import Optional, List, Dict, Any
+
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+# ==============================================================================
+# 1. CONFIGURATION & PATHS
+# ==============================================================================
+
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+RUN_DIR = os.environ.get("RUN_DIR", "/run/trading")
+CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
+
+# Files
+TRADES_CSV = os.path.join(DATA_DIR, "trades.csv")
+PNL_JSON = os.path.join(DATA_DIR, "pnl.json")
+STATE_JSON = os.path.join(DATA_DIR, "state.json")
+AI_LOG_PATH = os.path.join(DATA_DIR, "ai_log.jsonl")
+
+# Status Files
+STATUS_CRYPTO = os.path.join(DATA_DIR, "bot_status.json")
+STATUS_STOCKS = os.path.join(DATA_DIR, "bot_stocks_status.json")
+
+# Controls
+PAUSE_FILE = os.path.join(RUN_DIR, "PAUSE")
+KILL_FILE = os.path.join(RUN_DIR, "KILL_SWITCH")
+MANUAL_ORDER_PATH = os.path.join(RUN_DIR, "MANUAL_ORDER.json")
+
+# YAML Configs
+CONFIG_KRAKEN = os.path.join(CONFIG_DIR, "kraken.yaml")
+CONFIG_IBKR = os.path.join(CONFIG_DIR, "ibkr.yaml")
+AI_CONFIG_PATH = os.path.join(CONFIG_DIR, "ai.yaml")
+
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+START_TS = int(time.time())
+
+# Human Readable Names
+FRIENDLY_NAMES = {
+    # Crypto
+    "XXBTZUSD": "Bitcoin", "XETHZUSD": "Ethereum", "SOLUSD": "Solana",
+    "XXRPZUSD": "XRP", "ADAUSD": "Cardano", "XDGUSD": "Dogecoin",
+    "XBTUSD": "Bitcoin", "ETHUSD": "Ethereum",
+    # Stocks
+    "NVDA": "NVIDIA", "TSLA": "Tesla", "AAPL": "Apple", "MSFT": "Microsoft",
+    "AMD": "AMD", "INTC": "Intel", "F": "Ford", "GM": "GM",
+    "PLTR": "Palantir", "SOFI": "SoFi", "COIN": "Coinbase",
+    "BAC": "Bank of America", "T": "AT&T", "SPY": "S&P 500", "QQQ": "Nasdaq 100",
+    "IWM": "Russell 2000", "ARCC": "Ares Capital", "ET": "Energy Transfer",
+    "EPD": "Enterprise Products", "PFE": "Pfizer", "IONQ": "IonQ", "UPST": "Upstart"
+}
+
+# ==============================================================================
+# 2. DATA MODELS & API SETUP
+# ==============================================================================
+
+class ReasonBody(BaseModel):
+    reason: str = "manual"
+
+class PromptUpdate(BaseModel):
+    new_prompt: str
+    target_key: str  # 'strategy_decision' (Crypto) or 'stock_swing_decision' (Stocks)
+
+class ManualExecuteBody(BaseModel):
+    pair: str
+    side: str
+    notional_usd: float = 20.0
+
+app = FastAPI(title="Sentinel Command Center", version="10.8")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# ==============================================================================
+# 3. HELPER FUNCTIONS
+# ==============================================================================
+
+def _auth_ok(authorization: Optional[str]) -> bool:
+    if not ADMIN_TOKEN: return True
+    if not authorization or not authorization.startswith("Bearer "): return False
+    return authorization.split(" ", 1)[1].strip() == ADMIN_TOKEN
+
+def _require_auth(authorization: Optional[str]):
+    if not _auth_ok(authorization): raise HTTPException(401, "Unauthorized")
+
+def _read_json_safe(path):
+    if not os.path.exists(path): return {}
+    try:
+        with open(path, "r") as f: return json.load(f)
+    except: return {}
+
+def _load_yaml(path):
+    if not os.path.exists(path): return {}
+    try:
+        with open(path, "r") as f: return yaml.safe_load(f) or {}
+    except: return {}
+
+def _tail_file(path, limit=50):
+    if not os.path.exists(path): return []
+    try:
+        with open(path, "r") as f:
+            # Handle CSV vs JSONL
+            if path.endswith(".csv"): 
+                return list(csv.DictReader(f))[-limit:]
+            else: 
+                return [json.loads(line) for line in f if line.strip()][-limit:]
+    except: return []
+
+def _get_asset_type(symbol, kraken_pairs):
+    """Determines if a symbol is CRYPTO or STOCK based on config and patterns."""
+    clean_sym = symbol.replace("/", "")
+    # Strict Crypto Checks
+    if clean_sym in kraken_pairs: return "crypto"
+    if "USD" in clean_sym and len(clean_sym) >= 6: return "crypto" # e.g. XXBTZUSD, SOLUSD
+    if "XBT" in clean_sym or "ETH" in clean_sym: return "crypto"
+    
+    # Fallback to Stock
+    return "stocks"
+
+def _get_friendly_name(symbol):
+    fname = FRIENDLY_NAMES.get(symbol, symbol)
+    if fname == symbol: return symbol
+    return f"{fname} ({symbol})"
+
+def _extract_asset_from_prompt(prompt):
+    """Tries to find the Ticker/Asset name inside an AI log prompt."""
+    if not prompt: return "Unknown"
+    
+    # 1. Look for explicit "ASSET: XYZ" pattern from Stock Bot
+    m = re.search(r"ASSET:\s*([A-Z0-9]+)", prompt)
+    if m: return m.group(1)
+    
+    # 2. Look for explicit pairs in Crypto Bot text
+    for k, v in FRIENDLY_NAMES.items():
+        if k in prompt: return v
+        
+    return "Global/Unknown"
+
+# ==============================================================================
+# 4. API ENDPOINTS
+# ==============================================================================
+
+@app.get("/health")
+def health(authorization: Optional[str] = Header(default=None)):
+    return {
+        "status": "ok", 
+        "uptime": int(time.time() - START_TS),
+        "auth_ok": _auth_ok(authorization)
+    }
+
+@app.get("/api/data")
+def get_dashboard_data(authorization: Optional[str] = Header(default=None)):
+    """
+    The Main Aggregator.
+    Returns: Statuses, Positions, Trades, Logs, and Configs.
+    """
+    _require_auth(authorization)
+    
+    # 1. LOAD STATUS
+    st_crypto = _read_json_safe(STATUS_CRYPTO)
+    st_stocks = _read_json_safe(STATUS_STOCKS)
+    
+    # Inject Latch Status for UI color coding
+    if st_crypto.get("mode_config") == "live" and not st_crypto.get("live_allowed", False):
+        st_crypto["display_status"] = "LIVE (LATCHED)"
+        st_crypto["display_color"] = "yellow"
+    else:
+        mode = (st_crypto.get("mode_config") or "PAPER").upper()
+        st_crypto["display_status"] = mode
+        st_crypto["display_color"] = "green" if mode == "PAPER" else "red"
+
+    # 2. LOAD CONFIGS
+    kcfg = _load_yaml(CONFIG_KRAKEN)
+    kraken_pairs = kcfg.get("kraken", {}).get("pairs", [])
+    ibkr_stocks = _load_yaml(CONFIG_IBKR).get("universe", {}).get("stocks", [])
+    
+    # 3. PROCESS POSITIONS
+    state = _read_json_safe(STATE_JSON)
+    positions = {}
+    crypto_to_fetch = []
+    price_map = {}
+    
+    for symbol, data in state.items():
+        if not data.get("has_position"): continue
+        
+        atype = _get_asset_type(symbol, kraken_pairs)
+        data['asset_type'] = atype
+        data['friendly_name'] = _get_friendly_name(symbol)
+        
+        # Assign Mode
+        if atype == 'crypto':
+            data['mode'] = st_crypto.get("display_status", "PAPER")
+            crypto_to_fetch.append(symbol)
+        else:
+            # Stocks Mode
+            stock_mode = _load_yaml(CONFIG_IBKR).get("trading", {}).get("mode", "PAPER").upper()
+            data['mode'] = stock_mode
+            # Use average entry as fallback price if live price unavailable
+            price_map[symbol] = float(data.get("average_price", 0.0))
+        
+        positions[symbol] = data
+
+    # 3b. Fetch Live Crypto Prices
+    if crypto_to_fetch:
+        try:
+            base_url = kcfg.get("kraken", {}).get("base_url", "https://api.kraken.com")
+            pair_str = ",".join(crypto_to_fetch)
+            url = f"{base_url}/0/public/Ticker?pair={pair_str}"
+            resp = requests.get(url, timeout=2).json()
+            if not resp.get("error"):
+                for k, v in resp.get("result", {}).items():
+                    # 'c' is [price, lot_volume]
+                    price_map[k] = float(v["c"][0])
+        except Exception as e:
+            print(f"Price Fetch Error: {e}")
+        
+    # 3c. Calculate Unrealized PnL (With Rounding)
+    for s, p in positions.items():
+        curr = price_map.get(s, float(p.get("average_price", 0.0)))
+        p['current_price'] = round(curr, 4)
+        
+        entry = float(p.get("average_price", 0.0))
+        vol = float(p.get("base_volume", 0.0))
+        
+        val = curr * vol
+        unrealized = (curr - entry) * vol
+        pct = ((curr - entry) / entry) * 100 if entry > 0 else 0
+        
+        p['base_volume'] = round(vol, 4)
+        p['average_price'] = round(entry, 4)
+        p['current_value'] = round(val, 2)
+        p['unrealized_usd'] = round(unrealized, 2)
+        p['unrealized_pct'] = round(pct, 2)
+
+    # 4. PROCESS TRADES
+    raw_trades = _tail_file(TRADES_CSV, 50)
+    trades = []
+    for t in raw_trades:
+        # Normalize and Round
+        t['friendly_name'] = _get_friendly_name(t.get('pair'))
+        t['price'] = round(float(t.get('price', 0)), 4)
+        t['vol'] = round(float(t.get('vol', t.get('volume', 0))), 4)
+        trades.append(t)
+    
+    # 5. PROCESS AI LOGS
+    ai_logs_raw = _tail_file(AI_LOG_PATH, 50)
+    ai_logs = []
+    for log in ai_logs_raw:
+        prompt_txt = log.get("prompt", "")
+        log['asset'] = _extract_asset_from_prompt(prompt_txt)
+        
+        # Robust Type Detection
+        if "(STOCK)" in prompt_txt: 
+            log['type'] = 'stocks'
+        else: 
+            # Default to Crypto if not explicitly marked Stock
+            log['type'] = 'crypto'
+            
+        ai_logs.append(log)
+
+    return {
+        "status_crypto": st_crypto,
+        "status_stocks": st_stocks,
+        "positions": positions,
+        "trades": trades,
+        "ai_logs": ai_logs,
+        "prompts": _load_yaml(AI_CONFIG_PATH).get("prompts", {}),
+        "global_config": {
+            "kraken_pairs": kraken_pairs,
+            "ibkr_stocks": ibkr_stocks,
+            "friendly_map": FRIENDLY_NAMES
+        }
+    }
+
+@app.get("/api/equity")
+def get_equity_curve(filter: str = "all", authorization: Optional[str] = Header(default=None)):
+    """
+    Returns Equity Curve.
+    - ALL: Returns Global Account PnL from pnl.json
+    - CRYPTO/STOCKS: Calculates realized Cash Flow from trades.csv
+    """
+    _require_auth(authorization)
+    
+    # CASE 1: ALL (Global PnL)
+    if filter == "all":
+        pnl_data = _read_json_safe(PNL_JSON)
+        raw_curve = pnl_data.get("equity_curve_realized", [])
+        
+        # Round Data points
+        rounded_curve = []
+        for point in raw_curve[-200:]: # Last 200 points
+            rounded_curve.append([point[0], round(float(point[1]), 2)])
+            
+        return {"curve": rounded_curve, "label": "Total Portfolio Equity"}
+
+    # CASE 2: Specific Asset Class (Cash Flow Calculation)
+    if not os.path.exists(TRADES_CSV):
+        return {"curve": [], "label": f"No {filter.upper()} Trades Found"}
+
+    kcfg = _load_yaml(CONFIG_KRAKEN)
+    kraken_pairs = kcfg.get("kraken", {}).get("pairs", [])
+    
+    curve = []
+    cumulative = 0.0
+    has_data = False
+    
+    try:
+        with open(TRADES_CSV, "r") as f:
+            reader = csv.DictReader(f)
+            trades = list(reader)
+            trades.sort(key=lambda x: int(x['ts']))
+            
+            for t in trades:
+                pair = t['pair']
+                atype = _get_asset_type(pair, kraken_pairs) # Returns 'crypto' or 'stocks'
+                
+                # STRICT Filter
+                if filter != atype: continue
+                
+                has_data = True
+                # Cost is approximate cash impact
+                cost = float(t.get('notional_usd') or t.get('cost') or 0.0)
+                
+                if t['side'] == 'buy': 
+                    cumulative -= cost
+                else: 
+                    cumulative += cost
+                
+                curve.append([int(t['ts']), round(cumulative, 2)])
+
+            if len(curve) > 200: curve = curve[-200:]
+            
+            label = f"{filter.upper()} Net Cash Flow"
+            if not has_data: label = f"No {filter.upper()} Trades Yet"
+            
+            return {"curve": curve, "label": label}
+            
+    except Exception as e:
+        print(f"Equity Calc Error: {e}")
+        return {"curve": [], "label": "Error"}
+
+@app.get("/candles")
+def get_candles(pair: str, authorization: Optional[str] = Header(default=None)):
+    """
+    Fetches Candles.
+    Priority 1: Local Cache (Works for Stocks if bot saved them).
+    Priority 2: Kraken API (Fallback for Crypto).
+    """
+    _require_auth(authorization)
+    if not pair: return {"pair": "", "data": []}
+
+    safe_pair = "".join(c for c in pair if c.isalnum())
+    cache_file = os.path.join(CACHE_DIR, f"{safe_pair}_ohlc.json")
+    
+    # 1. Check Cache (Generated by both Crypto Bot and Stock Bot)
+    if os.path.exists(cache_file):
+        # We trust the cache if it's reasonably new (e.g., < 1 hour)
+        # or if it's a Stock (since we can't fetch stock data via web API directly)
+        is_fresh = (time.time() - os.path.getmtime(cache_file) < 3600)
+        is_crypto = "USD" in pair or "XBT" in pair
+        
+        if is_fresh or not is_crypto:
+            return _read_json_safe(cache_file)
+
+    # 2. Fallback to Kraken API (Crypto Only)
+    if "USD" in pair or "XBT" in pair:
+        try:
+            kcfg = _load_yaml(CONFIG_KRAKEN)
+            base_url = kcfg.get("kraken", {}).get("base_url", "https://api.kraken.com")
+            url = f"{base_url}/0/public/OHLC?pair={pair}&interval=60"
+            r = requests.get(url, timeout=5)
+            data = r.json()
+            
+            candles = []
+            if not data.get("error"):
+                for k, v in data.get("result", {}).items():
+                    if k != "last" and isinstance(v, list):
+                        for c in v:
+                            # x=Time, y=[Open, High, Low, Close]
+                            candles.append({
+                                "x": int(c[0]) * 1000, 
+                                "y": [float(c[1]), float(c[2]), float(c[3]), float(c[4])]
+                            })
+                        break
+            
+            # Save to cache so next time it's faster
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            result = {"pair": pair, "data": sorted(candles, key=lambda i: i['x'])}
+            with open(cache_file, "w") as f: json.dump(result, f)
+            return result
+        except: pass
+        
+    return {"pair": pair, "data": []}
+
+@app.post("/config/ai")
+def update_ai_config(body: PromptUpdate, authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    try:
+        cfg = _load_yaml(AI_CONFIG_PATH)
+        if "prompts" not in cfg: cfg["prompts"] = {}
+        cfg["prompts"][body.target_key] = body.new_prompt
+        with open(AI_CONFIG_PATH, "w") as f: yaml.dump(cfg, f)
+        return {"status": "saved", "key": body.target_key}
+    except Exception as e: raise HTTPException(500, str(e))
+
+# ==============================================================================
+# 5. CONTROL ENDPOINTS
+# ==============================================================================
+
+@app.post("/control/pause")
+def pause(body: ReasonBody, authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    with open(PAUSE_FILE, "w") as f: f.write(body.reason)
+    return {"status": "paused"}
+
+@app.post("/control/resume")
+def resume(authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    if os.path.exists(PAUSE_FILE): os.remove(PAUSE_FILE)
+    return {"status": "resumed"}
+
+@app.post("/control/kill")
+def kill(body: ReasonBody, authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    with open(KILL_FILE, "w") as f: f.write(body.reason)
+    return {"status": "killed"}
+
+@app.post("/control/restart")
+def restart(authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    os._exit(1)
+
+@app.post("/control/factory_reset")
+def factory_reset(authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    # Be careful with what we delete
+    for f in [STATE_JSON, PNL_JSON, TRADES_CSV, AI_LOG_PATH, STATUS_CRYPTO, STATUS_STOCKS]:
+        if os.path.exists(f): 
+            try: os.remove(f)
+            except: pass
+    return {"status": "reset_complete"}
+
+@app.post("/manual/execute")
+def manual_execute(body: ManualExecuteBody, authorization: Optional[str] = Header(None)):
+    _require_auth(authorization)
+    req = {"ts": int(time.time()), "pair": body.pair, "side": body.side, "notional_usd": body.notional_usd}
+    tmp = MANUAL_ORDER_PATH + ".tmp"
+    with open(tmp, "w") as f: json.dump(req, f)
+    os.replace(tmp, MANUAL_ORDER_PATH)
+    return {"queued": True}
+
+# ==============================================================================
+# 6. UI TEMPLATE
+# ==============================================================================
+
+# Uses Raw String (r"""). This prevents backslash escapes from breaking Python syntax.
+HTML_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sentinel Command Center</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Mono', monospace; }
+        .card { background-color: #1e293b; border: 1px solid #334155; border-radius: 0.5rem; padding: 1rem; }
+        .btn { padding: 0.5rem 1rem; border-radius: 0.25rem; font-weight: bold; cursor: pointer; transition: all 0.2s; }
+        .btn-blue { background-color: #3b82f6; color: white; } .btn-blue:hover { background-color: #2563eb; }
+        .btn-red { background-color: #ef4444; color: white; } .btn-red:hover { background-color: #dc2626; }
+        .btn-slate { background-color: #334155; color: white; } .btn-slate:hover { background-color: #475569; }
+        
+        .filter-btn { border: 1px solid #475569; color: #94a3b8; }
+        .filter-btn.active { background-color: #3b82f6; color: white; border-color: #3b82f6; }
+        
+        .status-dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .dot-green { background-color: #10b981; box-shadow: 0 0 5px #10b981; }
+        .dot-red { background-color: #ef4444; box-shadow: 0 0 5px #ef4444; }
+        .dot-yellow { background-color: #f59e0b; box-shadow: 0 0 5px #f59e0b; }
+        
+        table { width: 100%; border-collapse: collapse; }
+        th { text-align: left; border-bottom: 1px solid #334155; padding: 0.5rem; color: #94a3b8; font-size: 0.85rem; }
+        td { border-bottom: 1px solid #334155; padding: 0.5rem; font-size: 0.9rem; }
+    </style>
+</head>
+<body class="p-6">
+
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-3xl font-bold tracking-tight text-white">SENTINEL <span class="text-blue-500">AI</span></h1>
+            <p class="text-slate-400 text-sm">Multi-Asset Algorithmic Trading System</p>
+        </div>
+        <div class="flex items-center space-x-4">
+            <div id="auth-box" class="flex space-x-2">
+                <input id="token-input" type="password" placeholder="Admin Token" class="bg-slate-800 border border-slate-600 rounded px-2 py-1 text-sm">
+                <button onclick="saveToken()" class="text-xs bg-slate-700 px-2 py-1 rounded">Save</button>
+            </div>
+            
+            <div class="flex space-x-1 bg-slate-800 p-1 rounded-lg">
+                <button onclick="setFilter('all')" id="btn-all" class="filter-btn active btn text-sm">ALL</button>
+                <button onclick="setFilter('crypto')" id="btn-crypto" class="filter-btn btn text-sm">CRYPTO</button>
+                <button onclick="setFilter('stocks')" id="btn-stocks" class="filter-btn btn text-sm">STOCKS</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-6" id="controls-panel">
+        <h3 class="text-lg font-bold mb-4 flex justify-between">
+            <span>SYSTEM CONTROLS</span>
+            <span id="system-msg" class="text-yellow-500 text-sm font-mono"></span>
+        </h3>
+        <div class="flex space-x-3 flex-wrap">
+            <button onclick="apiCall('/control/pause', {reason:'UI'})" class="btn btn-blue text-sm">PAUSE ALL</button>
+            <button onclick="apiCall('/control/resume')" class="btn btn-blue text-sm">RESUME ALL</button>
+            <button onclick="apiCall('/control/restart')" class="btn btn-slate text-sm">RESTART CONTAINER</button>
+            <button onclick="apiCall('/control/kill', {reason:'UI'})" class="btn btn-red text-sm">KILL SWITCH</button>
+            <button onclick="if(confirm('RESET ALL DATA?')) apiCall('/control/factory_reset')" class="btn btn-red text-sm">FACTORY RESET</button>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <div id="card-crypto" class="card" data-type="crypto">
+            <div class="flex justify-between mb-2">
+                <h2 class="text-lg font-bold"><span id="crypto-indicator" class="status-dot dot-red"></span> ZEUS (Crypto)</h2>
+                <span id="crypto-ts" class="text-xs text-slate-500">--</span>
+            </div>
+            <div class="text-sm font-mono text-slate-300">
+                Mode: <span id="crypto-mode" class="text-blue-400 font-bold">--</span> | Status: <span id="crypto-status">--</span>
+            </div>
+        </div>
+        <div id="card-stocks" class="card" data-type="stocks">
+            <div class="flex justify-between mb-2">
+                <h2 class="text-lg font-bold"><span id="stocks-indicator" class="status-dot dot-red"></span> SENTINEL (Stocks)</h2>
+                <span id="stocks-ts" class="text-xs text-slate-500">--</span>
+            </div>
+            <div class="text-sm font-mono text-slate-300">
+                Mode: <span id="stocks-mode" class="text-blue-400 font-bold">--</span> | Scanning: <span id="stocks-count">--</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+        <div class="card">
+            <h3 class="text-slate-400 text-sm font-bold mb-1">TOTAL EQUITY</h3>
+            <p id="total-equity" class="text-3xl font-mono font-bold text-white">$0.00</p>
+            <p id="eq-label" class="text-xs text-slate-500 mt-2">Loading...</p>
+        </div>
+        <div class="card col-span-2">
+            <div id="equityChart" style="min-height: 150px;"></div>
+        </div>
+    </div>
+
+    <div class="card mb-6">
+        <h3 class="text-lg font-bold mb-4 border-b border-slate-700 pb-2">CURRENT HOLDINGS</h3>
+        <table class="w-full">
+            <thead>
+                <tr>
+                    <th>ASSET</th>
+                    <th>MODE</th>
+                    <th>SIZE</th>
+                    <th>AVG PRICE</th>
+                    <th>VALUE</th>
+                    <th>UNREALIZED</th>
+                </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+        </table>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <div class="card">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold">PRICE ACTION</h3>
+                <select id="chart-select" class="bg-slate-800 border border-slate-600 rounded text-sm p-1" onchange="loadCandles()">
+                    <option value="">Select Pair...</option>
+                </select>
+            </div>
+            <div id="candleChart" style="min-height: 250px;"></div>
+        </div>
+
+        <div class="card h-96 overflow-y-auto">
+            <h3 class="text-lg font-bold mb-4 sticky top-0 bg-[#1e293b] py-2">AI BRAIN LOGS</h3>
+            <div id="ai-logs" class="space-y-3 text-sm font-mono"></div>
+        </div>
+    </div>
+    
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="card h-64 overflow-y-auto">
+            <h3 class="text-lg font-bold mb-4 sticky top-0 bg-[#1e293b]">TRADE HISTORY</h3>
+            <table class="w-full">
+                <thead><tr><th>TIME</th><th>PAIR</th><th>SIDE</th><th>PRICE</th></tr></thead>
+                <tbody id="trades-body"></tbody>
+            </table>
+        </div>
+        
+        <div class="card">
+            <h3 class="text-lg font-bold mb-4 flex justify-between">
+                <span>AI PROMPT EDITOR</span>
+                <span id="prompt-target" class="text-xs text-blue-400 font-mono self-center"></span>
+            </h3>
+            <textarea id="prompt-text" class="w-full h-32 bg-slate-900 border border-slate-600 rounded p-2 text-xs font-mono mb-2" placeholder="Select a bot filter (Crypto/Stocks) to edit its instructions..."></textarea>
+            <div class="flex justify-end space-x-2">
+                <button onclick="loadConfig()" class="btn btn-slate text-xs">RELOAD</button>
+                <button onclick="saveConfig()" id="btn-save-prompt" class="btn btn-blue text-xs">SAVE PROMPT</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentFilter = 'all';
+        let cachedPrompts = {};
+        const TOKEN_KEY = "trading_admin_token";
+        
+        document.getElementById('token-input').value = localStorage.getItem(TOKEN_KEY) || "";
+
+        function saveToken() { localStorage.setItem(TOKEN_KEY, document.getElementById('token-input').value.trim()); alert("Saved"); fetchData(); }
+        function getAuthHeader() { const t = localStorage.getItem(TOKEN_KEY); return t ? { "Authorization": "Bearer " + t } : {}; }
+
+        async function apiCall(path, body=null) {
+            const opts = { method: 'POST', headers: { ...getAuthHeader(), 'Content-Type': 'application/json' } };
+            if (body) opts.body = JSON.stringify(body);
+            try { await fetch(path, opts); fetchData(); } catch(e) { console.error(e); }
+        }
+
+        function setFilter(type) {
+            currentFilter = type;
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('btn-' + type).classList.add('active');
+            
+            // Toggle Panels
+            document.getElementById('card-crypto').style.display = (type === 'all' || type === 'crypto') ? 'block' : 'none';
+            document.getElementById('card-stocks').style.display = (type === 'all' || type === 'stocks') ? 'block' : 'none';
+            
+            // Re-render editor logic
+            updateEditorState();
+            
+            fetchData();
+        }
+
+        // Charts
+        const commonOpts = { chart: { height: 250, toolbar: {show:false}, background: 'transparent' }, theme: { mode: 'dark' }, stroke: { curve: 'straight', width: 2 }, grid: { borderColor: '#334155' }, dataLabels: { enabled: false }, xaxis: { type: 'datetime' } };
+        const eqChart = new ApexCharts(document.querySelector("#equityChart"), { ...commonOpts, chart: { ...commonOpts.chart, type: 'area'}, colors: ['#3b82f6'], series: [] });
+        eqChart.render();
+        const candleChart = new ApexCharts(document.querySelector("#candleChart"), { ...commonOpts, chart: { ...commonOpts.chart, type: 'candlestick'}, plotOptions: { candlestick: { colors: { upward: '#10b981', downward: '#ef4444' } } }, series: [] });
+        candleChart.render();
+
+        async function fetchData() {
+            try {
+                const res = await fetch('/api/data', { headers: getAuthHeader() });
+                if (res.status === 401) { document.getElementById('system-msg').innerText = "AUTH REQUIRED"; return; }
+                const data = await res.json();
+
+                // 1. Config & Editor
+                if (data.prompts) cachedPrompts = data.prompts;
+                if (!document.getElementById('prompt-text').value && currentFilter !== 'all') updateEditorState();
+
+                // 2. Dropdown
+                updateDropdown(data.global_config);
+
+                // 3. Statuses
+                updateStatus(data);
+
+                // 4. Data Tables
+                updatePositions(data.positions);
+                updateTrades(data.trades);
+                updateAI(data.ai_logs);
+                
+                // 5. Equity Curve
+                const eqRes = await fetch(`/api/equity?filter=${currentFilter}`, { headers: getAuthHeader() });
+                const eqData = await eqRes.json();
+                
+                if(eqData.curve) eqChart.updateSeries([{ name: "Equity", data: eqData.curve.map(d => ({ x: d[0]*1000, y: d[1] })) }]);
+                document.getElementById('eq-label').innerText = eqData.label || "Equity";
+                
+                const finalVal = eqData.curve.length ? eqData.curve[eqData.curve.length-1][1] : 0;
+                const color = finalVal >= 0 ? "text-green-400" : "text-red-400";
+                document.getElementById('total-equity').innerHTML = `<span class="${color}">$${finalVal.toFixed(2)}</span>`;
+
+            } catch (e) { console.error(e); }
+        }
+
+        function updateDropdown(cfg) {
+            const sel = document.getElementById("chart-select");
+            const currentOpts = sel.options.length;
+            if(currentOpts > 1 && sel.dataset.filter === currentFilter) return; 
+            
+            sel.innerHTML = '<option value="">Select Pair...</option>';
+            sel.dataset.filter = currentFilter;
+            
+            let list = [];
+            // Context Aware Chart Dropdown
+            if(currentFilter === 'all') list = [...(cfg.kraken_pairs||[])]; 
+            // Add Stocks if All OR Stocks selected
+            if(currentFilter === 'all' || currentFilter === 'stocks') list = [...list, ...(cfg.ibkr_stocks||[])];
+            
+            // If Crypto only
+            if(currentFilter === 'crypto') list = cfg.kraken_pairs || [];
+            
+            list.forEach(p => {
+                const friendly = cfg.friendly_map[p] || p;
+                const opt = document.createElement("option"); opt.value = p; opt.text = friendly; sel.appendChild(opt);
+            });
+        }
+
+        function updateStatus(data) {
+            // Crypto Status
+            const sc = data.status_crypto || {};
+            const dColor = sc.display_color || 'red';
+            document.getElementById('crypto-indicator').className = `status-dot dot-${dColor}`;
+            document.getElementById('crypto-mode').innerText = (sc.display_status || 'UNKNOWN');
+            document.getElementById('crypto-status').innerText = sc.killed ? "KILLED" : (sc.paused ? "PAUSED" : "ACTIVE");
+            
+            // Stock Status
+            const ss = data.status_stocks || {};
+            const sMode = (ss.mode_config || 'PAPER').toUpperCase();
+            document.getElementById('stocks-indicator').className = `status-dot ${ss.paused ? 'dot-yellow' : 'dot-green'}`;
+            document.getElementById('stocks-mode').innerText = sMode;
+            document.getElementById('stocks-count').innerText = ss.tickers || 0;
+        }
+
+        function updatePositions(positions) {
+            const tbody = document.getElementById('positions-body');
+            tbody.innerHTML = '';
+            for (const [sym, pos] of Object.entries(positions)) {
+                const type = pos.asset_type.toLowerCase();
+                
+                // Filtering (Strict matching for "stocks" vs "stock" typos)
+                if (currentFilter !== 'all') {
+                    if (currentFilter === 'stocks' && type !== 'stocks') continue;
+                    if (currentFilter === 'crypto' && type !== 'crypto') continue;
+                }
+                
+                const upnl = pos.unrealized_usd || 0;
+                const pColor = upnl >= 0 ? "text-green-400" : "text-red-400";
+                
+                const modeStr = (pos.mode || 'UNK').toUpperCase();
+                const modeClass = modeStr.includes("LIVE") && !modeStr.includes("LATCH") ? "text-red-500 font-bold" : "text-slate-400";
+
+                tbody.innerHTML += `
+                    <tr class="border-b border-slate-700">
+                        <td class="py-2 font-bold text-white">${pos.friendly_name}</td>
+                        <td class="py-2 text-xs ${modeClass}">${modeStr}</td>
+                        <td class="py-2 font-mono">${parseFloat(pos.base_volume).toFixed(4)}</td>
+                        <td class="py-2 font-mono text-slate-400">$${parseFloat(pos.average_price).toFixed(4)}</td>
+                        <td class="py-2 font-mono text-white">$${(pos.current_value||0).toFixed(2)}</td>
+                        <td class="py-2 font-mono ${pColor}">$${upnl.toFixed(2)} (${pos.unrealized_pct.toFixed(2)}%)</td>
+                    </tr>`;
+            }
+        }
+
+        function updateTrades(trades) {
+            const tbody = document.getElementById('trades-body');
+            tbody.innerHTML = '';
+            trades.slice().reverse().forEach(t => {
+                // Infer type from pair if friendly_name missing or check generic logic
+                const isCrypto = t.pair.includes("USD") || t.pair.includes("XBT");
+                const type = isCrypto ? 'crypto' : 'stocks';
+                
+                if (currentFilter !== 'all') {
+                    if (currentFilter === 'stocks' && type !== 'stocks') return;
+                    if (currentFilter === 'crypto' && type !== 'crypto') return;
+                }
+                
+                const color = t.side === 'buy' ? 'text-green-400' : 'text-red-400';
+                tbody.innerHTML += `
+                    <tr class="border-b border-slate-800 text-xs">
+                        <td class="py-1 text-slate-400">${new Date(t.ts * 1000).toLocaleTimeString()}</td>
+                        <td class="py-1 font-bold">${t.friendly_name}</td>
+                        <td class="py-1 ${color} font-bold uppercase">${t.side}</td>
+                        <td class="py-1 font-mono">$${parseFloat(t.price).toFixed(4)}</td>
+                    </tr>`;
+            });
+        }
+
+        function updateAI(logs) {
+            const container = document.getElementById('ai-logs');
+            container.innerHTML = '';
+            logs.slice().reverse().forEach(log => {
+                // Strict Filtering
+                if (currentFilter !== 'all') {
+                    if (currentFilter === 'stocks' && log.type !== 'stocks') return;
+                    if (currentFilter === 'crypto' && log.type !== 'crypto') return;
+                }
+
+                const color = log.response.includes("GO") ? "text-green-400" : (log.response.includes("STOP") ? "text-red-400" : "text-slate-400");
+                container.innerHTML += `
+                    <div class="bg-slate-800 p-2 rounded border-l-2 border-slate-600 mb-2">
+                        <div class="flex justify-between text-xs text-slate-500 mb-1">
+                            <span>${new Date(log.ts * 1000).toLocaleTimeString()}</span>
+                            <span class="text-blue-400 font-bold">${log.asset}</span>
+                        </div>
+                        <div class="text-xs ${color} whitespace-pre-wrap">${log.response}</div>
+                    </div>`;
+            });
+        }
+        
+        function updateEditorState() {
+            const txt = document.getElementById('prompt-text');
+            const target = document.getElementById('prompt-target');
+            const btn = document.getElementById('btn-save-prompt');
+            
+            if (currentFilter === 'all') {
+                txt.value = ""; txt.disabled = true;
+                txt.placeholder = "<< SELECT A BOT (CRYPTO OR STOCKS) ABOVE TO EDIT INSTRUCTIONS >>";
+                target.innerText = "DISABLED";
+                btn.disabled = true;
+                btn.classList.add('opacity-50');
+            } else if (currentFilter === 'crypto') {
+                txt.disabled = false;
+                txt.value = cachedPrompts.strategy_decision || "";
+                target.innerText = "EDITING: ZEUS (Crypto)";
+                btn.disabled = false;
+                btn.classList.remove('opacity-50');
+            } else {
+                txt.disabled = false;
+                txt.value = cachedPrompts.stock_swing_decision || "";
+                target.innerText = "EDITING: SENTINEL (Stocks)";
+                btn.disabled = false;
+                btn.classList.remove('opacity-50');
+            }
+        }
+        
+        async function saveConfig() {
+            let key = currentFilter === 'crypto' ? 'strategy_decision' : 'stock_swing_decision';
+            await apiCall('/config/ai', { new_prompt: document.getElementById('prompt-text').value, target_key: key });
+            alert("Instructions Updated");
+        }
+        
+        async function loadCandles() {
+            const p = document.getElementById("chart-select").value;
+            if(!p) return;
+            const res = await fetch(`/candles?pair=${p}`, { headers: getAuthHeader() });
+            const d = await res.json();
+            if(d.data) candleChart.updateSeries([{ data: d.data }]);
+        }
+
+        async function loadConfig() {
+            const res = await fetch('/config/ai', { headers: getAuthHeader() });
+            const d = await res.json();
+            if(d.prompts) { cachedPrompts = d.prompts; updateEditorState(); }
+        }
+
+        setInterval(fetchData, 2000);
+        loadConfig();
+        fetchData();
+    </script>
+</body>
+</html>
+"""
+
+@app.get("/ui", response_class=HTMLResponse)
+def ui():
+    return HTMLResponse(content=HTML_TEMPLATE)
+
+@app.get("/")
+def root():
+    return HTMLResponse(content=HTML_TEMPLATE)
